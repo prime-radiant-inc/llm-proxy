@@ -1,8 +1,16 @@
+// config.go
 package main
 
+import (
+	"os"
+	"strconv"
+
+	toml "github.com/pelletier/go-toml/v2"
+)
+
 type Config struct {
-	Port   int
-	LogDir string
+	Port   int    `toml:"port"`
+	LogDir string `toml:"log_dir"`
 }
 
 func DefaultConfig() Config {
@@ -10,4 +18,44 @@ func DefaultConfig() Config {
 		Port:   8080,
 		LogDir: "./logs",
 	}
+}
+
+func LoadConfigFromTOML(data []byte) (Config, error) {
+	cfg := DefaultConfig()
+	if err := toml.Unmarshal(data, &cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func LoadConfigFromEnv(cfg Config) Config {
+	if port := os.Getenv("AGENT_LOGGER_PORT"); port != "" {
+		if p, err := strconv.Atoi(port); err == nil {
+			cfg.Port = p
+		}
+	}
+	if logDir := os.Getenv("AGENT_LOGGER_LOG_DIR"); logDir != "" {
+		cfg.LogDir = logDir
+	}
+	return cfg
+}
+
+func LoadConfig(configPath string) (Config, error) {
+	cfg := DefaultConfig()
+
+	// Try to load from TOML file if it exists
+	if configPath != "" {
+		data, err := os.ReadFile(configPath)
+		if err == nil {
+			cfg, err = LoadConfigFromTOML(data)
+			if err != nil {
+				return Config{}, err
+			}
+		}
+	}
+
+	// Override with environment variables
+	cfg = LoadConfigFromEnv(cfg)
+
+	return cfg, nil
 }
