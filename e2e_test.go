@@ -273,3 +273,132 @@ func TestLiveAnthropicStreamingProxy(t *testing.T) {
 
 	t.Logf("Live streaming proxy test successful!")
 }
+
+func TestLiveMultiTurnConversation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping live test in short mode")
+	}
+
+	apiKey := loadAPIKey(t)
+	tmpDir := t.TempDir()
+
+	srv, err := NewServer(Config{Port: 8080, LogDir: tmpDir})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer srv.Close()
+
+	proxy := httptest.NewServer(srv)
+	defer proxy.Close()
+
+	proxyURL := proxy.URL + "/anthropic/api.anthropic.com/v1/messages"
+	client := &http.Client{}
+
+	// Turn 1
+	turn1 := map[string]interface{}{
+		"model":      "claude-3-haiku-20240307",
+		"max_tokens": 50,
+		"messages": []map[string]string{
+			{"role": "user", "content": "Remember the number 42. Just say 'OK'."},
+		},
+	}
+
+	resp1 := makeRequest(t, client, proxyURL, apiKey, turn1)
+
+	// Extract assistant response
+	var result1 map[string]interface{}
+	json.Unmarshal(resp1, &result1)
+	content1 := extractTextContent(result1)
+
+	t.Logf("Turn 1 response: %s", content1)
+
+	// Turn 2 - continuation
+	turn2 := map[string]interface{}{
+		"model":      "claude-3-haiku-20240307",
+		"max_tokens": 50,
+		"messages": []map[string]string{
+			{"role": "user", "content": "Remember the number 42. Just say 'OK'."},
+			{"role": "assistant", "content": content1},
+			{"role": "user", "content": "What number did I ask you to remember?"},
+		},
+	}
+
+	resp2 := makeRequest(t, client, proxyURL, apiKey, turn2)
+
+	var result2 map[string]interface{}
+	json.Unmarshal(resp2, &result2)
+	content2 := extractTextContent(result2)
+
+	t.Logf("Turn 2 response: %s", content2)
+
+	if !strings.Contains(content2, "42") {
+		t.Errorf("Expected response to contain '42', got: %s", content2)
+	}
+
+	// Give logger time
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify session tracking worked
+	logFiles, _ := filepath.Glob(filepath.Join(tmpDir, "anthropic", "*.jsonl"))
+	t.Logf("Created %d log files", len(logFiles))
+
+	// Read and display log contents for debugging
+	for _, f := range logFiles {
+		data, _ := os.ReadFile(f)
+		t.Logf("Log file %s:\n%s", filepath.Base(f), string(data))
+	}
+
+	// Verify we have session entries
+	if len(logFiles) == 0 {
+		t.Fatal("No log files created")
+	}
+
+	// Verify DB has fingerprints
+	db, _ := NewSessionDB(filepath.Join(tmpDir, "sessions.db"))
+	defer db.Close()
+
+	// Count sessions
+	var count int
+	row := db.db.QueryRow("SELECT COUNT(*) FROM sessions")
+	row.Scan(&count)
+	t.Logf("Total sessions in DB: %d", count)
+}
+
+func makeRequest(t *testing.T, client *http.Client, url, apiKey string, body interface{}) []byte {
+	t.Helper()
+
+	bodyBytes, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", apiKey)
+	req.Header.Set("Anthropic-Version", "2023-06-01")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected 200, got %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return respBody
+}
+
+func extractTextContent(response map[string]interface{}) string {
+	content, ok := response["content"].([]interface{})
+	if !ok || len(content) == 0 {
+		return ""
+	}
+
+	block, ok := content[0].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+
+	text, _ := block["text"].(string)
+	return text
+}
