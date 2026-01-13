@@ -152,19 +152,32 @@ func ComputePriorFingerprint(body []byte, provider string) (string, error) {
 //
 //	user_<hash>_account_<uuid>_session_<session-uuid>
 //
+// For OpenAI, priority order:
+//  1. conversation (Responses API)
+//  2. previous_response_id (Responses API chaining)
+//  3. metadata.session_id
+//  4. user field
+//
 // Returns empty string if no session ID is found.
 func ExtractClientSessionID(body []byte, provider string) string {
-	if provider != "anthropic" {
-		// Only Anthropic metadata.user_id is supported currently
-		return ""
-	}
-
 	var request map[string]interface{}
 	if err := json.Unmarshal(body, &request); err != nil {
 		return ""
 	}
 
-	// Get metadata.user_id
+	if provider == "anthropic" {
+		return extractAnthropicSessionID(request)
+	}
+
+	if provider == "openai" {
+		return extractOpenAISessionID(request)
+	}
+
+	return ""
+}
+
+// extractAnthropicSessionID extracts session ID from Anthropic's metadata.user_id
+func extractAnthropicSessionID(request map[string]interface{}) string {
 	metadata, ok := request["metadata"].(map[string]interface{})
 	if !ok {
 		return ""
@@ -193,6 +206,42 @@ func ExtractClientSessionID(body []byte, provider string) string {
 	}
 
 	return sessionID
+}
+
+// extractOpenAISessionID extracts session ID from OpenAI request fields
+// Priority: conversation > previous_response_id > metadata.session_id > user
+func extractOpenAISessionID(request map[string]interface{}) string {
+	// 1. conversation (Responses API)
+	if conv, ok := request["conversation"].(string); ok && conv != "" {
+		if isValidSessionID(conv) {
+			return conv
+		}
+	}
+
+	// 2. previous_response_id (Responses API chaining)
+	if prevResp, ok := request["previous_response_id"].(string); ok && prevResp != "" {
+		if isValidSessionID(prevResp) {
+			return prevResp
+		}
+	}
+
+	// 3. metadata.session_id
+	if metadata, ok := request["metadata"].(map[string]interface{}); ok {
+		if sessID, ok := metadata["session_id"].(string); ok && sessID != "" {
+			if isValidSessionID(sessID) {
+				return sessID
+			}
+		}
+	}
+
+	// 4. user field
+	if user, ok := request["user"].(string); ok && user != "" {
+		if isValidSessionID(user) {
+			return user
+		}
+	}
+
+	return ""
 }
 
 // lastIndex returns the index of the last occurrence of substr in s, or -1 if not found

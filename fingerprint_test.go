@@ -193,19 +193,74 @@ func TestExtractClientSessionIDNoMetadata(t *testing.T) {
 	}
 }
 
-func TestExtractClientSessionIDOpenAI(t *testing.T) {
-	// OpenAI provider - not supported, should return empty
+func TestExtractClientSessionIDOpenAIChatCompletionsUser(t *testing.T) {
+	// OpenAI Chat Completions with user field
 	request := `{
-		"model": "gpt-4",
+		"model": "gpt-4o",
 		"messages": [{"role": "user", "content": "hello"}],
-		"metadata": {
-			"user_id": "user_abc_session_12345"
-		}
+		"user": "user-12345"
+	}`
+
+	sessionID := ExtractClientSessionID([]byte(request), "openai")
+	if sessionID != "user-12345" {
+		t.Errorf("Expected session ID 'user-12345', got '%s'", sessionID)
+	}
+}
+
+func TestExtractClientSessionIDOpenAIMetadata(t *testing.T) {
+	// OpenAI with metadata.session_id (takes priority over user)
+	request := `{
+		"model": "gpt-4o",
+		"messages": [{"role": "user", "content": "hello"}],
+		"user": "user-12345",
+		"metadata": {"session_id": "sess-abc-789"}
+	}`
+
+	sessionID := ExtractClientSessionID([]byte(request), "openai")
+	if sessionID != "sess-abc-789" {
+		t.Errorf("Expected session ID 'sess-abc-789', got '%s'", sessionID)
+	}
+}
+
+func TestExtractClientSessionIDOpenAIResponsesConversation(t *testing.T) {
+	// OpenAI Responses API with conversation field (highest body priority)
+	request := `{
+		"model": "gpt-4o",
+		"input": [{"role": "user", "content": "hello"}],
+		"conversation": "conv_abc123",
+		"metadata": {"session_id": "other-session"}
+	}`
+
+	sessionID := ExtractClientSessionID([]byte(request), "openai")
+	if sessionID != "conv_abc123" {
+		t.Errorf("Expected session ID 'conv_abc123', got '%s'", sessionID)
+	}
+}
+
+func TestExtractClientSessionIDOpenAIPreviousResponseID(t *testing.T) {
+	// OpenAI Responses API with previous_response_id
+	request := `{
+		"model": "gpt-4o",
+		"input": [{"role": "user", "content": "hello"}],
+		"previous_response_id": "resp_xyz789"
+	}`
+
+	sessionID := ExtractClientSessionID([]byte(request), "openai")
+	if sessionID != "resp_xyz789" {
+		t.Errorf("Expected session ID 'resp_xyz789', got '%s'", sessionID)
+	}
+}
+
+func TestExtractClientSessionIDOpenAINoSession(t *testing.T) {
+	// OpenAI request with no session identifiers
+	request := `{
+		"model": "gpt-4o",
+		"messages": [{"role": "user", "content": "hello"}]
 	}`
 
 	sessionID := ExtractClientSessionID([]byte(request), "openai")
 	if sessionID != "" {
-		t.Errorf("Expected empty session ID for OpenAI provider, got '%s'", sessionID)
+		t.Errorf("Expected empty session ID, got '%s'", sessionID)
 	}
 }
 
