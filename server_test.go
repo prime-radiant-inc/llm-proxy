@@ -8,7 +8,12 @@ import (
 )
 
 func TestHealthEndpoint(t *testing.T) {
-	srv := NewServer(Config{Port: 8080, LogDir: "./test-logs"})
+	tmpDir := t.TempDir()
+	srv, err := NewServer(Config{Port: 8080, LogDir: tmpDir})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer srv.Close()
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -32,7 +37,12 @@ func TestServerProxiesRequests(t *testing.T) {
 
 	upstreamHost := strings.TrimPrefix(upstream.URL, "http://")
 
-	srv := NewServer(Config{Port: 8080, LogDir: "./test-logs"})
+	tmpDir := t.TempDir()
+	srv, err := NewServer(Config{Port: 8080, LogDir: tmpDir})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer srv.Close()
 
 	reqPath := "/anthropic/" + upstreamHost + "/v1/messages"
 	req := httptest.NewRequest("POST", reqPath, strings.NewReader(`{"messages":[]}`))

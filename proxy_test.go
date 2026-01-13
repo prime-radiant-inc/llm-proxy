@@ -5,8 +5,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestProxyBasicRequest(t *testing.T) {
@@ -75,5 +78,47 @@ func TestProxyForwardsHeaders(t *testing.T) {
 	}
 	if receivedHeaders.Get("Anthropic-Version") != "2023-06-01" {
 		t.Error("Anthropic-Version header not forwarded")
+	}
+}
+
+func TestProxyLogsRequests(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"response":"logged"}`))
+	}))
+	defer upstream.Close()
+
+	upstreamHost := strings.TrimPrefix(upstream.URL, "http://")
+
+	logger, _ := NewLogger(tmpDir)
+	defer logger.Close()
+
+	proxy := NewProxyWithLogger(logger)
+
+	reqPath := "/anthropic/" + upstreamHost + "/v1/messages"
+	req := httptest.NewRequest("POST", reqPath, strings.NewReader(`{"messages":[]}`))
+	req.Header.Set("X-Api-Key", "sk-ant-test123456")
+
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	// Give async logging a moment
+	time.Sleep(50 * time.Millisecond)
+
+	// Check that log file was created
+	files, _ := filepath.Glob(filepath.Join(tmpDir, "anthropic", "*.jsonl"))
+	if len(files) == 0 {
+		t.Error("Expected log file to be created")
+	}
+
+	// Read and verify content
+	data, _ := os.ReadFile(files[0])
+	if !strings.Contains(string(data), `"type":"request"`) {
+		t.Error("Log should contain request entry")
+	}
+	if !strings.Contains(string(data), `"type":"response"`) {
+		t.Error("Log should contain response entry")
 	}
 }

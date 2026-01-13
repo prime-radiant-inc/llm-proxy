@@ -42,7 +42,12 @@ func TestLiveAnthropicProxy(t *testing.T) {
 	apiKey := loadAPIKey(t)
 
 	// Start our proxy server
-	srv := NewServer(Config{Port: 8080, LogDir: "./test-logs"})
+	tmpDir := t.TempDir()
+	srv, err := NewServer(Config{Port: 8080, LogDir: tmpDir})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer srv.Close()
 	proxy := httptest.NewServer(srv)
 	defer proxy.Close()
 

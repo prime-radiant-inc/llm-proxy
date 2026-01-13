@@ -62,7 +62,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	srv := NewServer(cfg)
+	srv, err := NewServer(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating server: %v\n", err)
+		os.Exit(1)
+	}
 	addr := fmt.Sprintf(":%d", cfg.Port)
 
 	// Run shutdown handler in background

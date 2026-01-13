@@ -2,22 +2,59 @@
 package main
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 )
 
 type Proxy struct {
-	client *http.Client
+	client    *http.Client
+	logger    *Logger
+	sessionMu sync.Mutex
+	seqNums   map[string]int
 }
 
 func NewProxy() *Proxy {
 	return &Proxy{
-		client: &http.Client{},
+		client:  &http.Client{},
+		seqNums: make(map[string]int),
 	}
 }
 
+func NewProxyWithLogger(logger *Logger) *Proxy {
+	return &Proxy{
+		client:  &http.Client{},
+		logger:  logger,
+		seqNums: make(map[string]int),
+	}
+}
+
+func (p *Proxy) generateSessionID() string {
+	return time.Now().UTC().Format("20060102-150405") + "-" + randomHex(4)
+}
+
+func (p *Proxy) nextSeq(sessionID string) int {
+	p.sessionMu.Lock()
+	defer p.sessionMu.Unlock()
+	seq := p.seqNums[sessionID]
+	p.seqNums[sessionID] = seq + 1
+	return seq
+}
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+
 	// Parse the proxy URL
 	provider, upstream, path, err := ParseProxyURL(r.URL.Path)
 	if err != nil {
@@ -37,8 +74,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		upstreamURL += "?" + r.URL.RawQuery
 	}
 
-	// Create forwarded request
-	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, r.Body)
+	// Buffer request body for logging
+	var reqBody []byte
+	if r.Body != nil {
+		reqBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "failed to read request body: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		r.Body.Close()
+	}
+
+	// Create forwarded request with buffered body
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(reqBody))
 	if err != nil {
 		http.Error(w, "failed to create request: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -50,6 +98,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Set host header
 	proxyReq.Host = upstream
 
+	// Generate session ID and sequence for logging
+	var sessionID string
+	var seq int
+	if p.logger != nil {
+		sessionID = p.generateSessionID()
+		seq = p.nextSeq(sessionID)
+		p.logger.LogSessionStart(sessionID, provider, upstream)
+		p.logger.LogRequest(sessionID, provider, seq, r.Method, path, r.Header, reqBody)
+	}
+
 	// Make request to upstream
 	resp, err := p.client.Do(proxyReq)
 	if err != nil {
@@ -58,16 +116,36 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// Record TTFB
+	ttfb := time.Since(startTime)
+
+	// Buffer response body for logging
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "failed to read response body: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// Record total time
+	totalTime := time.Since(startTime)
+
+	// Log response
+	if p.logger != nil {
+		timing := ResponseTiming{
+			TTFBMs:  ttfb.Milliseconds(),
+			TotalMs: totalTime.Milliseconds(),
+		}
+		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, respBody, nil, timing)
+	}
+
 	// Copy response headers
 	copyHeaders(w.Header(), resp.Header)
 
 	// Write status code
 	w.WriteHeader(resp.StatusCode)
 
-	// Copy response body
-	io.Copy(w, resp.Body)
-
-	_ = provider // Will be used for session tracking later
+	// Write response body
+	w.Write(respBody)
 }
 
 func copyHeaders(dst, src http.Header) {

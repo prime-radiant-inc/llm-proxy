@@ -8,16 +8,23 @@ type Server struct {
 	config Config
 	mux    *http.ServeMux
 	proxy  *Proxy
+	logger *Logger
 }
 
-func NewServer(cfg Config) *Server {
+func NewServer(cfg Config) (*Server, error) {
+	logger, err := NewLogger(cfg.LogDir)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &Server{
 		config: cfg,
 		mux:    http.NewServeMux(),
-		proxy:  NewProxy(),
+		proxy:  NewProxyWithLogger(logger),
+		logger: logger,
 	}
 	s.mux.HandleFunc("/health", s.handleHealth)
-	return s
+	return s, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -37,5 +44,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Close() error {
+	if s.logger != nil {
+		return s.logger.Close()
+	}
 	return nil
 }
