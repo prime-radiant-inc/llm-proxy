@@ -373,11 +373,14 @@ Expected: FAIL - `ParseCLIFlags` undefined
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 type CLIFlags struct {
@@ -426,13 +429,24 @@ func main() {
 
 	cfg = MergeConfig(cfg, flags)
 
+	// Setup graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	srv := NewServer(cfg)
 	addr := fmt.Sprintf(":%d", cfg.Port)
+
+	// Run shutdown handler in background
+	go func() {
+		<-ctx.Done()
+		log.Println("Shutting down gracefully...")
+		srv.Close()
+	}()
 
 	log.Printf("Starting transparent-agent-logger on %s", addr)
 	log.Printf("Log directory: %s", cfg.LogDir)
 
-	if err := http.ListenAndServe(addr, srv); err != nil {
+	if err := http.ListenAndServe(addr, srv); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
 }
@@ -1487,6 +1501,18 @@ func (l *Logger) LogResponse(sessionID, provider string, seq int, status int, he
 
 	return l.writeEntry(sessionID, provider, entry)
 }
+
+// LogFork records a fork event when conversation history diverges
+func (l *Logger) LogFork(sessionID, provider string, fromSeq int, parentSession string) error {
+	entry := map[string]interface{}{
+		"type":           "fork",
+		"ts":             time.Now().UTC().Format(time.RFC3339Nano),
+		"from_seq":       fromSeq,
+		"parent_session": parentSession,
+		"reason":         "message_history_diverged",
+	}
+	return l.writeEntry(sessionID, provider, entry)
+}
 ```
 
 **Step 4: Run tests to verify they pass**
@@ -2024,55 +2050,45 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // isStreamingRequest checks if the request is asking for streaming
 func isStreamingRequest(body []byte) bool {
-	// Simple check - look for "stream":true in the body
-	return len(body) > 0 && (
-		contains(body, `"stream":true`) ||
-		contains(body, `"stream": true`))
-}
-
-func contains(body []byte, substr string) bool {
-	return len(body) >= len(substr) && string(body) != "" &&
-		indexOf(string(body), substr) >= 0
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
+	s := string(body)
+	return strings.Contains(s, `"stream":true`) ||
+		strings.Contains(s, `"stream": true`)
 }
 
 // isStreamingResponse checks if the response is SSE
 func isStreamingResponse(resp *http.Response) bool {
 	contentType := resp.Header.Get("Content-Type")
-	return contentType == "text/event-stream" ||
-		(len(contentType) >= 17 && contentType[:17] == "text/event-stream")
+	return strings.HasPrefix(contentType, "text/event-stream")
 }
 
-// StreamingResponseWriter wraps http.ResponseWriter to capture chunks
+// StreamingResponseWriter wraps http.ResponseWriter to capture chunks and accumulate text
 type StreamingResponseWriter struct {
 	http.ResponseWriter
-	chunks    []StreamChunk
-	startTime time.Time
-	lastChunk time.Time
+	chunks          []StreamChunk
+	startTime       time.Time
+	lastChunk       time.Time
+	accumulatedText strings.Builder // Accumulate assistant response for fingerprinting
+	provider        string
 }
 
-func NewStreamingResponseWriter(w http.ResponseWriter) *StreamingResponseWriter {
+func NewStreamingResponseWriter(w http.ResponseWriter, provider string) *StreamingResponseWriter {
 	now := time.Now()
 	return &StreamingResponseWriter{
 		ResponseWriter: w,
 		chunks:         make([]StreamChunk, 0),
 		startTime:      now,
 		lastChunk:      now,
+		provider:       provider,
 	}
 }
 
@@ -2087,6 +2103,11 @@ func (s *StreamingResponseWriter) Write(data []byte) (int, error) {
 	s.chunks = append(s.chunks, chunk)
 	s.lastChunk = now
 
+	// Extract and accumulate text deltas for fingerprinting
+	if text := extractDeltaText(data, s.provider); text != "" {
+		s.accumulatedText.WriteString(text)
+	}
+
 	return s.ResponseWriter.Write(data)
 }
 
@@ -2100,9 +2121,61 @@ func (s *StreamingResponseWriter) Chunks() []StreamChunk {
 	return s.chunks
 }
 
+func (s *StreamingResponseWriter) AccumulatedText() string {
+	return s.accumulatedText.String()
+}
+
+// extractDeltaText extracts text content from SSE delta events (provider-aware)
+func extractDeltaText(data []byte, provider string) string {
+	line := string(data)
+
+	// SSE format: "data: {...}\n"
+	if !strings.HasPrefix(line, "data: ") {
+		return ""
+	}
+
+	jsonStr := strings.TrimPrefix(line, "data: ")
+	jsonStr = strings.TrimSpace(jsonStr)
+
+	if jsonStr == "[DONE]" || jsonStr == "" {
+		return ""
+	}
+
+	var event map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &event); err != nil {
+		return ""
+	}
+
+	if provider == "anthropic" {
+		// Anthropic: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
+		if event["type"] != "content_block_delta" {
+			return ""
+		}
+		if delta, ok := event["delta"].(map[string]interface{}); ok {
+			if text, ok := delta["text"].(string); ok {
+				return text
+			}
+		}
+	} else if provider == "openai" {
+		// OpenAI: {"choices":[{"delta":{"content":"..."}}]}
+		if choices, ok := event["choices"].([]interface{}); ok && len(choices) > 0 {
+			if choice, ok := choices[0].(map[string]interface{}); ok {
+				if delta, ok := choice["delta"].(map[string]interface{}); ok {
+					if content, ok := delta["content"].(string); ok {
+						return content
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
 // streamResponse handles streaming responses from upstream
-func streamResponse(w http.ResponseWriter, resp *http.Response, logger *Logger, sessionID, provider string, seq int, startTime time.Time) error {
-	sw := NewStreamingResponseWriter(w)
+// NOTE: Requires sessionManager and reqBody to update fingerprint after streaming completes
+func streamResponse(w http.ResponseWriter, resp *http.Response, logger *Logger, sm *SessionManager, sessionID, provider string, seq int, startTime time.Time, reqBody []byte) error {
+	sw := NewStreamingResponseWriter(w, provider)
 
 	// Copy headers
 	copyHeaders(w.Header(), resp.Header)
@@ -2135,6 +2208,18 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, logger *Logger, 
 			TotalMs: time.Since(startTime).Milliseconds(),
 		}
 		logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, sw.chunks, timing)
+	}
+
+	// Update session fingerprint with accumulated response text
+	if sm != nil && sw.AccumulatedText() != "" {
+		// Build mock response for fingerprinting
+		var mockResponse []byte
+		if provider == "anthropic" {
+			mockResponse = []byte(fmt.Sprintf(`{"content":[{"type":"text","text":%q}]}`, sw.AccumulatedText()))
+		} else {
+			mockResponse = []byte(fmt.Sprintf(`{"choices":[{"message":{"role":"assistant","content":%q}}]}`, sw.AccumulatedText()))
+		}
+		sm.RecordResponse(sessionID, seq, reqBody, mockResponse, provider)
 	}
 
 	return nil
@@ -2204,8 +2289,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	// Handle streaming vs non-streaming responses
+	// NOTE: Full signature with sessionManager used in Task 18
 	if isStreamingResponse(resp) {
-		streamResponse(w, resp, p.logger, sessionID, provider, seq, startTime)
+		streamResponse(w, resp, p.logger, nil, sessionID, provider, seq, startTime, reqBody)
 		return
 	}
 
@@ -2700,6 +2786,52 @@ func TestExtractPriorMessages(t *testing.T) {
 		t.Errorf("Expected 2 prior messages, got %d", len(prior))
 	}
 }
+
+func TestExtractAssistantMessageAnthropic(t *testing.T) {
+	response := `{"content":[{"type":"text","text":"Hello there!"}],"model":"claude-3"}`
+
+	msg, err := ExtractAssistantMessage([]byte(response), "anthropic")
+	if err != nil {
+		t.Fatalf("Failed to extract assistant message: %v", err)
+	}
+
+	if msg["role"] != "assistant" {
+		t.Errorf("Expected role 'assistant', got %v", msg["role"])
+	}
+	if msg["content"] != "Hello there!" {
+		t.Errorf("Expected content 'Hello there!', got %v", msg["content"])
+	}
+}
+
+func TestExtractAssistantMessageOpenAI(t *testing.T) {
+	response := `{"choices":[{"message":{"role":"assistant","content":"Hi!"}}]}`
+
+	msg, err := ExtractAssistantMessage([]byte(response), "openai")
+	if err != nil {
+		t.Fatalf("Failed to extract assistant message: %v", err)
+	}
+
+	if msg["role"] != "assistant" {
+		t.Errorf("Expected role 'assistant', got %v", msg["role"])
+	}
+	if msg["content"] != "Hi!" {
+		t.Errorf("Expected content 'Hi!', got %v", msg["content"])
+	}
+}
+
+func TestExtractAssistantMessageMalformed(t *testing.T) {
+	// Should return error for malformed JSON
+	_, err := ExtractAssistantMessage([]byte("not json"), "anthropic")
+	if err == nil {
+		t.Error("Expected error for malformed JSON")
+	}
+
+	// Should return error for missing content
+	_, err = ExtractAssistantMessage([]byte(`{}`), "anthropic")
+	if err == nil {
+		t.Error("Expected error for missing content")
+	}
+}
 ```
 
 **Step 2: Run test to verify it fails**
@@ -2717,6 +2849,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sort"
 )
 
@@ -2848,6 +2981,49 @@ func ComputePriorFingerprint(body []byte, provider string) (string, error) {
 
 	return FingerprintMessages(priorJSON), nil
 }
+
+// ExtractAssistantMessage extracts the assistant's response from API response body
+// This is needed to build the complete state fingerprint (messages + assistant reply)
+func ExtractAssistantMessage(responseBody []byte, provider string) (map[string]interface{}, error) {
+	var resp map[string]interface{}
+	if err := json.Unmarshal(responseBody, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if provider == "anthropic" {
+		// Anthropic: {"content": [{"type": "text", "text": "..."}], ...}
+		content, ok := resp["content"].([]interface{})
+		if !ok || len(content) == 0 {
+			return nil, fmt.Errorf("missing or empty content in response")
+		}
+		block, ok := content[0].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid content block format")
+		}
+		text, _ := block["text"].(string)
+		return map[string]interface{}{
+			"role":    "assistant",
+			"content": text,
+		}, nil
+	} else if provider == "openai" {
+		// OpenAI: {"choices": [{"message": {"role": "assistant", "content": "..."}}]}
+		choices, ok := resp["choices"].([]interface{})
+		if !ok || len(choices) == 0 {
+			return nil, fmt.Errorf("missing or empty choices in response")
+		}
+		choice, ok := choices[0].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid choice format")
+		}
+		message, ok := choice["message"].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("missing message in choice")
+		}
+		return message, nil
+	}
+
+	return nil, fmt.Errorf("unsupported provider: %s", provider)
+}
 ```
 
 **Step 4: Run tests**
@@ -2877,14 +3053,17 @@ git commit -m "feat: add message fingerprinting for session tracking"
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestSessionManagerNewSession(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	sm, err := NewSessionManager(tmpDir)
+	sm, err := NewSessionManager(tmpDir, nil) // nil logger for tests
 	if err != nil {
 		t.Fatalf("Failed to create session manager: %v", err)
 	}
@@ -2912,17 +3091,19 @@ func TestSessionManagerNewSession(t *testing.T) {
 func TestSessionManagerContinuation(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	sm, _ := NewSessionManager(tmpDir)
+	sm, _ := NewSessionManager(tmpDir, nil)
 	defer sm.Close()
 
 	// First request
 	body1 := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 	sessionID1, _, _, _ := sm.GetOrCreateSession(body1, "anthropic", "api.anthropic.com")
 
-	// Record the response (simulating assistant reply)
-	sm.RecordResponse(sessionID1, 1, body1)
+	// Mock API response with assistant reply - THIS IS THE KEY FIX
+	response1 := []byte(`{"content":[{"type":"text","text":"hi"}]}`)
+	sm.RecordResponse(sessionID1, 1, body1, response1, "anthropic")
 
 	// Second request continues the conversation
+	// Prior messages [user:hello, assistant:hi] should match the fingerprint we stored
 	body2 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"how are you"}]}`)
 	sessionID2, seq2, isNew, _ := sm.GetOrCreateSession(body2, "anthropic", "api.anthropic.com")
 
@@ -2940,20 +3121,23 @@ func TestSessionManagerContinuation(t *testing.T) {
 func TestSessionManagerFork(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	sm, _ := NewSessionManager(tmpDir)
+	sm, _ := NewSessionManager(tmpDir, nil)
 	defer sm.Close()
 
 	// First request
 	body1 := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 	sessionID1, _, _, _ := sm.GetOrCreateSession(body1, "anthropic", "api.anthropic.com")
-	sm.RecordResponse(sessionID1, 1, body1)
+	response1 := []byte(`{"content":[{"type":"text","text":"hi"}]}`)
+	sm.RecordResponse(sessionID1, 1, body1, response1, "anthropic")
 
-	// Second request
+	// Second request - takes option A path
 	body2 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"option A"}]}`)
 	sm.GetOrCreateSession(body2, "anthropic", "api.anthropic.com")
-	sm.RecordResponse(sessionID1, 2, body2)
+	response2 := []byte(`{"content":[{"type":"text","text":"you chose A"}]}`)
+	sm.RecordResponse(sessionID1, 2, body2, response2, "anthropic")
 
 	// Third request - but goes back to first state and takes different path (fork!)
+	// Prior is [user:hello, assistant:hi] which matches state after seq 1
 	body3 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"option B"}]}`)
 	sessionID3, seq3, isNew, _ := sm.GetOrCreateSession(body3, "anthropic", "api.anthropic.com")
 
@@ -2966,6 +3150,93 @@ func TestSessionManagerFork(t *testing.T) {
 	}
 	if seq3 != 1 {
 		t.Errorf("Fork should start at seq 1, got %d", seq3)
+	}
+}
+
+func TestForkCopiesLogCorrectly(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	logger, _ := NewLogger(tmpDir)
+	defer logger.Close()
+
+	sm, _ := NewSessionManager(tmpDir, logger)
+	defer sm.Close()
+
+	// Create first session with multiple exchanges
+	body1 := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	sessionID1, _, _, _ := sm.GetOrCreateSession(body1, "anthropic", "api.anthropic.com")
+
+	// Log session start and first request
+	logger.LogSessionStart(sessionID1, "anthropic", "api.anthropic.com")
+	logger.LogRequest(sessionID1, "anthropic", 1, "POST", "/v1/messages", nil, body1)
+
+	// Record response for seq 1
+	response1 := []byte(`{"content":[{"type":"text","text":"hi"}]}`)
+	sm.RecordResponse(sessionID1, 1, body1, response1, "anthropic")
+
+	// Log response
+	logger.LogResponse(sessionID1, "anthropic", 1, 200, nil, response1, nil, ResponseTiming{})
+
+	// Second exchange
+	body2 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"option A"}]}`)
+	sm.GetOrCreateSession(body2, "anthropic", "api.anthropic.com")
+	logger.LogRequest(sessionID1, "anthropic", 2, "POST", "/v1/messages", nil, body2)
+	response2 := []byte(`{"content":[{"type":"text","text":"you chose A"}]}`)
+	sm.RecordResponse(sessionID1, 2, body2, response2, "anthropic")
+	logger.LogResponse(sessionID1, "anthropic", 2, 200, nil, response2, nil, ResponseTiming{})
+
+	// Third exchange
+	body3 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"option A"},{"role":"assistant","content":"you chose A"},{"role":"user","content":"more stuff"}]}`)
+	sm.GetOrCreateSession(body3, "anthropic", "api.anthropic.com")
+	logger.LogRequest(sessionID1, "anthropic", 3, "POST", "/v1/messages", nil, body3)
+	response3 := []byte(`{"content":[{"type":"text","text":"ok"}]}`)
+	sm.RecordResponse(sessionID1, 3, body3, response3, "anthropic")
+	logger.LogResponse(sessionID1, "anthropic", 3, 200, nil, response3, nil, ResponseTiming{})
+
+	// Close logger to flush
+	logger.Close()
+
+	// Fork from seq 1 (take option B instead of option A)
+	bodyFork := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":"option B"}]}`)
+	forkSessionID, _, isNew, _ := sm.GetOrCreateSession(bodyFork, "anthropic", "api.anthropic.com")
+
+	if !isNew {
+		t.Error("Fork should create new session")
+	}
+
+	// Read the forked log file
+	forkedLogPath := filepath.Join(tmpDir, "anthropic", forkSessionID+".jsonl")
+	forkedData, err := os.ReadFile(forkedLogPath)
+	if err != nil {
+		t.Fatalf("Failed to read forked log: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(forkedData)), "\n")
+
+	// Should have: session_start, request seq 1, response seq 1
+	// Should NOT have: request seq 2, response seq 2, request seq 3, response seq 3
+	foundSeq1 := false
+	foundSeq2 := false
+
+	for _, line := range lines {
+		var entry map[string]interface{}
+		json.Unmarshal([]byte(line), &entry)
+
+		if seq, ok := entry["seq"].(float64); ok {
+			if int(seq) == 1 {
+				foundSeq1 = true
+			}
+			if int(seq) == 2 {
+				foundSeq2 = true
+			}
+		}
+	}
+
+	if !foundSeq1 {
+		t.Error("Forked log should contain seq 1 entries")
+	}
+	if foundSeq2 {
+		t.Error("Forked log should NOT contain seq 2 entries (after fork point)")
 	}
 }
 ```
@@ -2982,9 +3253,9 @@ Expected: FAIL - types undefined
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -2994,10 +3265,11 @@ import (
 type SessionManager struct {
 	baseDir string
 	db      *SessionDB
+	logger  *Logger // For logging fork events
 	mu      sync.Mutex
 }
 
-func NewSessionManager(baseDir string) (*SessionManager, error) {
+func NewSessionManager(baseDir string, logger *Logger) (*SessionManager, error) {
 	dbPath := filepath.Join(baseDir, "sessions.db")
 
 	db, err := NewSessionDB(dbPath)
@@ -3008,6 +3280,7 @@ func NewSessionManager(baseDir string) (*SessionManager, error) {
 	return &SessionManager{
 		baseDir: baseDir,
 		db:      db,
+		logger:  logger,
 	}, nil
 }
 
@@ -3099,6 +3372,11 @@ func (sm *SessionManager) createForkSession(parentSession string, forkSeq int, p
 		return "", 0, false, err
 	}
 
+	// Log the fork event
+	if sm.logger != nil {
+		sm.logger.LogFork(sessionID, provider, forkSeq, parentSession)
+	}
+
 	return sessionID, 1, true, nil
 }
 
@@ -3124,30 +3402,67 @@ func (sm *SessionManager) copyLogToForkPoint(srcPath, dstPath string, forkSeq in
 	}
 	defer dst.Close()
 
-	// Copy lines up to fork point (including responses up to forkSeq)
-	// For simplicity, copy entire file for now - proper implementation would
-	// parse JSONL and stop at forkSeq
-	_, err = io.Copy(dst, src)
-	return err
+	// Parse JSONL and copy entries up to fork point
+	scanner := bufio.NewScanner(src)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+
+		var entry map[string]interface{}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			// Can't parse line, skip it
+			continue
+		}
+
+		// Always copy session_start entries
+		if entry["type"] == "session_start" {
+			dst.Write(line)
+			dst.Write([]byte("\n"))
+			continue
+		}
+
+		// For request/response entries, check the sequence number
+		if seq, ok := entry["seq"].(float64); ok {
+			if int(seq) > forkSeq {
+				// Stop at fork point - don't copy entries past forkSeq
+				break
+			}
+		}
+
+		dst.Write(line)
+		dst.Write([]byte("\n"))
+	}
+
+	return scanner.Err()
 }
 
 // RecordResponse records the fingerprint after a response, for continuation tracking
-func (sm *SessionManager) RecordResponse(sessionID string, seq int, requestBody []byte) error {
+// KEY FIX: Now takes response body to extract assistant message and build full state
+func (sm *SessionManager) RecordResponse(sessionID string, seq int, requestBody, responseBody []byte, provider string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Compute fingerprint of full message array (state after this turn)
-	messages, err := ExtractMessages(requestBody, "anthropic")
+	// Extract assistant's reply from API response
+	assistantMsg, err := ExtractAssistantMessage(responseBody, provider)
+	if err != nil {
+		return fmt.Errorf("failed to extract assistant message: %w", err)
+	}
+
+	// Get original messages from request
+	messages, err := ExtractMessages(requestBody, provider)
+	if err != nil {
+		return fmt.Errorf("failed to extract messages: %w", err)
+	}
+
+	// Build complete state: request messages + assistant reply
+	// This is what the next request's prior messages should match
+	fullState := append(messages, assistantMsg)
+
+	// Fingerprint the full state
+	stateJSON, err := json.Marshal(fullState)
 	if err != nil {
 		return err
 	}
-
-	messagesJSON, err := json.Marshal(messages)
-	if err != nil {
-		return err
-	}
-
-	fingerprint := FingerprintMessages(messagesJSON)
+	fingerprint := FingerprintMessages(stateJSON)
 
 	return sm.db.UpdateSessionFingerprint(sessionID, seq, fingerprint)
 }
@@ -3260,6 +3575,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -3360,7 +3676,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Handle streaming vs non-streaming
 	if isStreamingResponse(resp) {
-		streamResponse(w, resp, p.logger, sessionID, provider, seq, startTime)
+		// KEY FIX: Pass sessionManager and reqBody for fingerprinting
+		streamResponse(w, resp, p.logger, p.sessionManager, sessionID, provider, seq, startTime, reqBody)
+		// Note: streamResponse handles RecordResponse internally after accumulating text
 	} else {
 		ttfb := time.Since(startTime).Milliseconds()
 		respBody, _ := io.ReadAll(resp.Body)
@@ -3374,11 +3692,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		copyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
-	}
 
-	// Record response for session tracking
-	if p.sessionManager != nil && isConversationEndpoint(path) {
-		p.sessionManager.RecordResponse(sessionID, seq, reqBody)
+		// KEY FIX: Record response with response body and provider for fingerprinting
+		if p.sessionManager != nil && isConversationEndpoint(path) {
+			p.sessionManager.RecordResponse(sessionID, seq, reqBody, respBody, provider)
+		}
 	}
 }
 
@@ -3410,11 +3728,7 @@ func isLocalhost(host string) bool {
 }
 ```
 
-**Step 3: Add missing import to proxy.go**
-
-Add: `"strings"` to imports
-
-**Step 4: Update server to use session manager**
+**Step 3: Update server to use session manager**
 
 ```go
 // server.go
@@ -3433,7 +3747,8 @@ type Server struct {
 
 func NewServer(cfg Config) *Server {
 	logger, _ := NewLogger(cfg.LogDir)
-	sm, _ := NewSessionManager(cfg.LogDir)
+	// KEY FIX: Pass logger to SessionManager for fork logging
+	sm, _ := NewSessionManager(cfg.LogDir, logger)
 
 	s := &Server{
 		config:         cfg,
@@ -3464,16 +3779,16 @@ func (s *Server) Close() error {
 }
 ```
 
-**Step 5: Add io import to integration_test.go**
+**Step 4: Add io import to integration_test.go**
 
 Add: `"io"` to imports
 
-**Step 6: Run tests**
+**Step 5: Run tests**
 
 Run: `go test -v`
 Expected: All tests PASS
 
-**Step 7: Commit**
+**Step 6: Commit**
 
 ```bash
 git add proxy.go server.go integration_test.go
@@ -3771,3 +4086,42 @@ This plan implements the transparent-agent-logger in 20 tasks across 7 phases:
 7. **Phase 7 (Tasks 19-20):** Full validation - Comprehensive E2E tests, documentation
 
 Each task follows strict TDD: write failing test → verify failure → implement → verify pass → commit.
+
+---
+
+## Important Implementation Notes
+
+### Critical Bug Fixes Applied
+
+This plan has been updated to fix several critical bugs identified during review:
+
+1. **Session Continuation Detection (Critical):** `RecordResponse` now accepts both request AND response bodies to build the complete state fingerprint. Without this, continuation detection would fail because the fingerprint of `[user:hello]` would never match the next request's prior of `[user:hello, assistant:hi]`.
+
+2. **Fork Log File Copy (Critical):** `copyLogToForkPoint` now properly parses JSONL and stops at the fork sequence number instead of copying the entire file.
+
+3. **Streaming Response Fingerprinting:** `streamResponse` now accumulates assistant text from SSE delta events and calls `RecordResponse` after streaming completes.
+
+4. **Provider-Aware Delta Extraction:** `extractDeltaText` handles both Anthropic (`content_block_delta`) and OpenAI (`choices[0].delta.content`) streaming formats.
+
+5. **Error Handling:** `ExtractAssistantMessage` includes proper error handling for malformed JSON responses.
+
+6. **isLocalhost Safety:** Uses `strings.HasPrefix` instead of direct slice access to avoid panics on short strings.
+
+7. **Graceful Shutdown:** Added signal handling in `main.go` for clean shutdown on SIGINT/SIGTERM.
+
+8. **Fork Logging:** `LogFork` method added to logger, called from `createForkSession`.
+
+### Task Dependency Order
+
+Due to the fixes above, certain tasks have interdependencies:
+
+1. Task 10 (logger.go) - Must add `LogFork` method first
+2. Task 16 (fingerprint.go) - Must add `ExtractAssistantMessage` with error handling
+3. Task 13 (streaming.go) - Must add `extractDeltaText` and update `streamResponse` signature
+4. Task 17 (session.go) - Depends on Task 16 for `ExtractAssistantMessage`; must update `RecordResponse` signature and `copyLogToForkPoint`
+5. Task 18 (proxy.go) - Depends on Tasks 13 and 17; must use new signatures
+6. Task 4 (main.go) - Add graceful shutdown (can be done anytime)
+
+### Known Limitations
+
+- **TOCTOU Race Condition:** Between `GetOrCreateSession` and `RecordResponse` calls, another request could interleave under high concurrency. This may occasionally create extra branches. For v1 this is acceptable; a full fix would require transactional session handles.
