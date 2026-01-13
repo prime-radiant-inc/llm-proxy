@@ -4,3 +4,10 @@ transparent-agent-logger
 
 # Test artifacts
 test-logs/
+evidence/
+*.db
+
+# Misc test files
+test-threading.sh
+sqlite3
+echo
