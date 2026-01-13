@@ -1,0 +1,9 @@
+# Transparent Agent Logger Configuration
+# All settings are optional - defaults work out of the box
+
+# Port to listen on (default: 8080)
+port = 8080
+
+# Directory for log files (default: ./logs)
+# sessions.db is stored inside this directory
+log_dir = "./logs"
