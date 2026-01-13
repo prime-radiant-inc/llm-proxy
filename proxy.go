@@ -116,6 +116,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// Handle streaming vs non-streaming responses
+	if isStreamingResponse(resp) {
+		streamResponse(w, resp, p.logger, nil, sessionID, provider, seq, startTime, reqBody)
+		return
+	}
+
+	// Non-streaming response
 	// Record TTFB
 	ttfb := time.Since(startTime)
 
