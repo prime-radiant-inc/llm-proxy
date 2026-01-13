@@ -10,12 +10,6 @@ import (
 	"time"
 )
 
-// SessionManager placeholder - defined properly in Task 17
-type SessionManager struct{}
-
-func (sm *SessionManager) RecordResponse(sessionID string, seq int, reqBody, respBody []byte, provider string) {
-}
-
 // isStreamingRequest checks if the request is asking for streaming
 func isStreamingRequest(body []byte) bool {
 	s := string(body)
