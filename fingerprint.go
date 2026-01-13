@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sort"
 )
 
@@ -147,7 +148,7 @@ func ComputePriorFingerprint(body []byte, provider string) (string, error) {
 	return FingerprintMessages(priorJSON), nil
 }
 
-// ExtractClientSessionID extracts a client-provided session ID from the request body.
+// ExtractClientSessionID extracts a client-provided session ID from the request.
 // For Anthropic, this is found in metadata.user_id with format:
 //
 //	user_<hash>_account_<uuid>_session_<session-uuid>
@@ -156,10 +157,12 @@ func ComputePriorFingerprint(body []byte, provider string) (string, error) {
 //  1. conversation (Responses API)
 //  2. previous_response_id (Responses API chaining)
 //  3. metadata.session_id
-//  4. user field
+//  4. X-Session-ID header
+//  5. X-Client-Request-Id header
+//  6. user field
 //
 // Returns empty string if no session ID is found.
-func ExtractClientSessionID(body []byte, provider string) string {
+func ExtractClientSessionID(body []byte, provider string, headers http.Header) string {
 	var request map[string]interface{}
 	if err := json.Unmarshal(body, &request); err != nil {
 		return ""
@@ -170,7 +173,7 @@ func ExtractClientSessionID(body []byte, provider string) string {
 	}
 
 	if provider == "openai" {
-		return extractOpenAISessionID(request)
+		return extractOpenAISessionID(request, headers)
 	}
 
 	return ""
@@ -208,9 +211,9 @@ func extractAnthropicSessionID(request map[string]interface{}) string {
 	return sessionID
 }
 
-// extractOpenAISessionID extracts session ID from OpenAI request fields
-// Priority: conversation > previous_response_id > metadata.session_id > user
-func extractOpenAISessionID(request map[string]interface{}) string {
+// extractOpenAISessionID extracts session ID from OpenAI request fields and headers
+// Priority: conversation > previous_response_id > metadata.session_id > X-Session-ID > X-Client-Request-Id > user
+func extractOpenAISessionID(request map[string]interface{}, headers http.Header) string {
 	// 1. conversation (Responses API)
 	if conv, ok := request["conversation"].(string); ok && conv != "" {
 		if isValidSessionID(conv) {
@@ -234,7 +237,23 @@ func extractOpenAISessionID(request map[string]interface{}) string {
 		}
 	}
 
-	// 4. user field
+	// 4. X-Session-ID header
+	if headers != nil {
+		if sessID := headers.Get("X-Session-ID"); sessID != "" {
+			if isValidSessionID(sessID) {
+				return sessID
+			}
+		}
+
+		// 5. X-Client-Request-Id header
+		if clientReq := headers.Get("X-Client-Request-Id"); clientReq != "" {
+			if isValidSessionID(clientReq) {
+				return clientReq
+			}
+		}
+	}
+
+	// 6. user field
 	if user, ok := request["user"].(string); ok && user != "" {
 		if isValidSessionID(user) {
 			return user

@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -40,12 +41,12 @@ func (sm *SessionManager) Close() error {
 // GetOrCreateSession determines if this request continues an existing session,
 // forks from an earlier point, or starts a new session.
 // Returns: sessionID, sequence number, isNewSession, error
-func (sm *SessionManager) GetOrCreateSession(body []byte, provider, upstream string) (string, int, bool, error) {
+func (sm *SessionManager) GetOrCreateSession(body []byte, provider, upstream string, headers http.Header) (string, int, bool, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	// First, check if the client provided a session ID (e.g., Claude Code via metadata.user_id)
-	clientSessionID := ExtractClientSessionID(body, provider)
+	clientSessionID := ExtractClientSessionID(body, provider, headers)
 	if clientSessionID != "" {
 		return sm.getOrCreateByClientSessionID(clientSessionID, provider, upstream)
 	}

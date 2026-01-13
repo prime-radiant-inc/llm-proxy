@@ -21,7 +21,7 @@ func TestSessionManagerNewSession(t *testing.T) {
 	// First message = new session
 	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 
-	sessionID, seq, isNew, err := sm.GetOrCreateSession(body, "anthropic", "api.anthropic.com")
+	sessionID, seq, isNew, err := sm.GetOrCreateSession(body, "anthropic", "api.anthropic.com", nil)
 	if err != nil {
 		t.Fatalf("Failed to get session: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestSessionManagerContinuation(t *testing.T) {
 
 	// First request
 	body1 := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	sessionID1, _, _, _ := sm.GetOrCreateSession(body1, "anthropic", "api.anthropic.com")
+	sessionID1, _, _, _ := sm.GetOrCreateSession(body1, "anthropic", "api.anthropic.com", nil)
 
 	// Mock API response with assistant reply
 	response1 := []byte(`{"content":[{"type":"text","text":"hi"}]}`)
@@ -54,7 +54,7 @@ func TestSessionManagerContinuation(t *testing.T) {
 	// Second request continues the conversation
 	// Assistant content must be array format to match what we stored from the response
 	body2 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi"}]},{"role":"user","content":"how are you"}]}`)
-	sessionID2, seq2, isNew, _ := sm.GetOrCreateSession(body2, "anthropic", "api.anthropic.com")
+	sessionID2, seq2, isNew, _ := sm.GetOrCreateSession(body2, "anthropic", "api.anthropic.com", nil)
 
 	if isNew {
 		t.Error("Continuation should not create new session")
@@ -75,20 +75,20 @@ func TestSessionManagerFork(t *testing.T) {
 
 	// First request
 	body1 := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	sessionID1, _, _, _ := sm.GetOrCreateSession(body1, "anthropic", "api.anthropic.com")
+	sessionID1, _, _, _ := sm.GetOrCreateSession(body1, "anthropic", "api.anthropic.com", nil)
 	response1 := []byte(`{"content":[{"type":"text","text":"hi"}]}`)
 	sm.RecordResponse(sessionID1, 1, body1, response1, "anthropic")
 
 	// Second request - takes option A path (assistant content as array)
 	body2 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi"}]},{"role":"user","content":"option A"}]}`)
-	sm.GetOrCreateSession(body2, "anthropic", "api.anthropic.com")
+	sm.GetOrCreateSession(body2, "anthropic", "api.anthropic.com", nil)
 	response2 := []byte(`{"content":[{"type":"text","text":"you chose A"}]}`)
 	sm.RecordResponse(sessionID1, 2, body2, response2, "anthropic")
 
 	// Third request - but goes back to first state and takes different path (fork!)
 	// Prior is [user:hello, assistant:[{type:text,text:hi}]] which matches state after seq 1
 	body3 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi"}]},{"role":"user","content":"option B"}]}`)
-	sessionID3, seq3, isNew, _ := sm.GetOrCreateSession(body3, "anthropic", "api.anthropic.com")
+	sessionID3, seq3, isNew, _ := sm.GetOrCreateSession(body3, "anthropic", "api.anthropic.com", nil)
 
 	// Should create a new session (branch)
 	if !isNew {
@@ -113,7 +113,7 @@ func TestForkCopiesLogCorrectly(t *testing.T) {
 
 	// Create first session with multiple exchanges
 	body1 := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
-	sessionID1, _, _, _ := sm.GetOrCreateSession(body1, "anthropic", "api.anthropic.com")
+	sessionID1, _, _, _ := sm.GetOrCreateSession(body1, "anthropic", "api.anthropic.com", nil)
 
 	// Log session start and first request
 	logger.LogSessionStart(sessionID1, "anthropic", "api.anthropic.com")
@@ -128,7 +128,7 @@ func TestForkCopiesLogCorrectly(t *testing.T) {
 
 	// Second exchange (assistant content as array)
 	body2 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi"}]},{"role":"user","content":"option A"}]}`)
-	sm.GetOrCreateSession(body2, "anthropic", "api.anthropic.com")
+	sm.GetOrCreateSession(body2, "anthropic", "api.anthropic.com", nil)
 	logger.LogRequest(sessionID1, "anthropic", 2, "POST", "/v1/messages", nil, body2)
 	response2 := []byte(`{"content":[{"type":"text","text":"you chose A"}]}`)
 	sm.RecordResponse(sessionID1, 2, body2, response2, "anthropic")
@@ -136,7 +136,7 @@ func TestForkCopiesLogCorrectly(t *testing.T) {
 
 	// Third exchange (assistant content as array)
 	body3 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi"}]},{"role":"user","content":"option A"},{"role":"assistant","content":[{"type":"text","text":"you chose A"}]},{"role":"user","content":"more stuff"}]}`)
-	sm.GetOrCreateSession(body3, "anthropic", "api.anthropic.com")
+	sm.GetOrCreateSession(body3, "anthropic", "api.anthropic.com", nil)
 	logger.LogRequest(sessionID1, "anthropic", 3, "POST", "/v1/messages", nil, body3)
 	response3 := []byte(`{"content":[{"type":"text","text":"ok"}]}`)
 	sm.RecordResponse(sessionID1, 3, body3, response3, "anthropic")
@@ -144,7 +144,7 @@ func TestForkCopiesLogCorrectly(t *testing.T) {
 
 	// Fork from seq 1 (take option B instead of option A)
 	bodyFork := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi"}]},{"role":"user","content":"option B"}]}`)
-	forkSessionID, _, isNew, _ := sm.GetOrCreateSession(bodyFork, "anthropic", "api.anthropic.com")
+	forkSessionID, _, isNew, _ := sm.GetOrCreateSession(bodyFork, "anthropic", "api.anthropic.com", nil)
 
 	// Close logger to flush before reading files
 	logger.Close()
