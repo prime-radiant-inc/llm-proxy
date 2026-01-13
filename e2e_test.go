@@ -191,3 +191,85 @@ func TestLiveAnthropicProxyWithLogging(t *testing.T) {
 	t.Logf("Live proxy with logging test successful!")
 	t.Logf("Log file: %s", logFiles[0])
 }
+
+func TestLiveAnthropicStreamingProxy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping live test in short mode")
+	}
+
+	apiKey := loadAPIKey(t)
+	tmpDir := t.TempDir()
+
+	srv, err := NewServer(Config{Port: 8080, LogDir: tmpDir})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer srv.Close()
+
+	proxy := httptest.NewServer(srv)
+	defer proxy.Close()
+
+	proxyURL := proxy.URL + "/anthropic/api.anthropic.com/v1/messages"
+
+	requestBody := map[string]interface{}{
+		"model":      "claude-3-haiku-20240307",
+		"max_tokens": 50,
+		"stream":     true,
+		"messages": []map[string]string{
+			{"role": "user", "content": "Count from 1 to 5, one number per line."},
+		},
+	}
+
+	bodyBytes, _ := json.Marshal(requestBody)
+	req, _ := http.NewRequest("POST", proxyURL, bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", apiKey)
+	req.Header.Set("Anthropic-Version", "2023-06-01")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Expected 200, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Verify it's streaming
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(contentType, "text/event-stream") {
+		t.Errorf("Expected text/event-stream, got %s", contentType)
+	}
+
+	// Read streaming response
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	if !strings.Contains(bodyStr, "event:") && !strings.Contains(bodyStr, "data:") {
+		t.Error("Response should contain SSE events")
+	}
+
+	// Give logger time to flush
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify logs capture chunks
+	logFiles, _ := filepath.Glob(filepath.Join(tmpDir, "anthropic", "*.jsonl"))
+	if len(logFiles) == 0 {
+		t.Fatal("No log files created")
+	}
+
+	logData, _ := os.ReadFile(logFiles[0])
+	logContent := string(logData)
+
+	if !strings.Contains(logContent, `"chunks"`) {
+		t.Error("Log should contain chunks array for streaming response")
+	}
+	if !strings.Contains(logContent, `"delta_ms"`) {
+		t.Error("Log should contain delta_ms timing for chunks")
+	}
+
+	t.Logf("Live streaming proxy test successful!")
+}
