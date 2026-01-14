@@ -79,6 +79,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// For OpenAI requests, dynamically route based on auth type:
+	// - JWT tokens (ChatGPT OAuth) → chatgpt.com/backend-api/codex
+	// - API keys (sk-...) → api.openai.com
+	if provider == "openai" && upstream == "api.openai.com" {
+		if isJWTAuth(r.Header) {
+			upstream = "chatgpt.com"
+			path = "/backend-api/codex" + path
+		}
+	}
+
 	// Determine scheme (use http for tests, https for real)
 	scheme := "https"
 	if isLocalhost(upstream) {
@@ -215,6 +225,43 @@ func copyHeaders(dst, src http.Header) {
 // Uses strings.HasPrefix for safety (avoids panics on short strings).
 func isLocalhost(host string) bool {
 	return strings.HasPrefix(host, "127.0.0.1") || strings.HasPrefix(host, "localhost")
+}
+
+// isJWTAuth checks if the Authorization header contains a JWT token (ChatGPT OAuth)
+// rather than an OpenAI API key (sk-...).
+// JWT format: three base64-encoded parts separated by dots (header.payload.signature)
+func isJWTAuth(headers http.Header) bool {
+	auth := headers.Get("Authorization")
+	if auth == "" {
+		return false
+	}
+
+	// Extract token from "Bearer <token>"
+	token := strings.TrimPrefix(auth, "Bearer ")
+	if token == auth {
+		// No "Bearer " prefix
+		return false
+	}
+
+	// API keys start with sk-
+	if strings.HasPrefix(token, "sk-") {
+		return false
+	}
+
+	// JWT has exactly 3 parts separated by dots
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+
+	// Each part should be non-empty (basic validation)
+	for _, part := range parts {
+		if len(part) == 0 {
+			return false
+		}
+	}
+
+	return true
 }
 
 // isConversationEndpoint returns true for API endpoints that represent conversations

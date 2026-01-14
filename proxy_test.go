@@ -123,6 +123,36 @@ func TestProxyLogsRequests(t *testing.T) {
 	}
 }
 
+func TestIsJWTAuth(t *testing.T) {
+	tests := []struct {
+		name     string
+		auth     string
+		expected bool
+	}{
+		{"empty", "", false},
+		{"api key", "Bearer sk-abc123xyz", false},
+		{"api key proj", "Bearer sk-proj-abc123xyz", false},
+		{"jwt token", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", true},
+		{"no bearer prefix", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig", false},
+		{"two parts only", "Bearer abc.def", false},
+		{"four parts", "Bearer a.b.c.d", false},
+		{"empty part", "Bearer abc..def", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := http.Header{}
+			if tt.auth != "" {
+				headers.Set("Authorization", tt.auth)
+			}
+			got := isJWTAuth(headers)
+			if got != tt.expected {
+				t.Errorf("isJWTAuth(%q) = %v, want %v", tt.auth, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestIsConversationEndpoint(t *testing.T) {
 	tests := []struct {
 		path     string
