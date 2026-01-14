@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LLM Proxy Explorer</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <nav>
+        <h1>LLM Proxy Explorer</h1>
+        <form action="/search" method="get">
+            <input type="text" name="q" placeholder="Search logs...">
+            <button type="submit">Search</button>
+        </form>
+    </nav>
+    <main>
+        <h2>Sessions</h2>
+        {{if not .Sessions}}
+        <p>No sessions found.</p>
+        {{else}}
+        {{$currentDate := ""}}
+        {{range .Sessions}}
+            {{if ne .Date $currentDate}}
+                {{$currentDate = .Date}}
+                <h3>{{.Date}}</h3>
+            {{end}}
+            <div class="session">
+                <a href="/session/{{.ID}}">{{.ID}}</a>
+                <span class="host">{{.Host}}</span>
+            </div>
+        {{end}}
+        {{end}}
+    </main>
+</body>
+</html>

@@ -24,6 +24,8 @@ type CLIFlags struct {
 	Setup       bool
 	Uninstall   bool
 	Status      bool
+	Explore     bool
+	ExplorePort int
 }
 
 func ParseCLIFlags(args []string) (CLIFlags, error) {
@@ -39,6 +41,8 @@ func ParseCLIFlags(args []string) (CLIFlags, error) {
 	fs.BoolVar(&flags.Setup, "setup", false, "Full setup: install systemd service, enable, start, and configure shell")
 	fs.BoolVar(&flags.Uninstall, "uninstall", false, "Uninstall: stop service, remove service file, remove shell patches, remove portfile")
 	fs.BoolVar(&flags.Status, "status", false, "Show proxy status and exit")
+	fs.BoolVar(&flags.Explore, "explore", false, "Start log explorer web UI")
+	fs.IntVar(&flags.ExplorePort, "explore-port", 8080, "Port for explorer web UI")
 
 	if err := fs.Parse(args); err != nil {
 		return CLIFlags{}, err
@@ -71,6 +75,12 @@ func MergeConfig(cfg Config, flags CLIFlags) Config {
 	}
 	if flags.Status {
 		cfg.Status = true
+	}
+	if flags.Explore {
+		cfg.Explore = true
+	}
+	if flags.ExplorePort != 0 {
+		cfg.ExplorePort = flags.ExplorePort
 	}
 	return cfg
 }
@@ -146,6 +156,30 @@ func main() {
 		}
 		fmt.Println("LLM Proxy installed and started.")
 		fmt.Println("Restart your shell to activate.")
+		os.Exit(0)
+	}
+
+	// Handle --explore: start log explorer
+	if cfg.Explore {
+		home, _ := os.UserHomeDir()
+		logDir := cfg.LogDir
+		if logDir == "" || logDir == "./logs" {
+			logDir = filepath.Join(home, ".llm-provider-logs")
+		}
+
+		port := cfg.ExplorePort
+		if port == 0 {
+			port = 8080
+		}
+
+		explorer := NewExplorer(logDir)
+
+		addr := fmt.Sprintf(":%d", port)
+		log.Printf("Starting LLM Proxy Explorer on http://localhost%s", addr)
+
+		if err := http.ListenAndServe(addr, explorer); err != nil {
+			log.Fatalf("Explorer server error: %v", err)
+		}
 		os.Exit(0)
 	}
 

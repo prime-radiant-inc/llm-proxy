@@ -17,6 +17,8 @@ type Config struct {
 	Setup       bool   `toml:"-"` // CLI-only, not persisted in config file
 	Uninstall   bool   `toml:"-"` // CLI-only, not persisted in config file
 	Status      bool   `toml:"-"` // CLI-only, not persisted in config file
+	Explore     bool   `toml:"-"` // CLI-only, not persisted in config file
+	ExplorePort int    `toml:"explore_port"`
 }
 
 func DefaultConfig() Config {
