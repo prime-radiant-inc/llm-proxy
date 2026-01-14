@@ -29,12 +29,12 @@ func LoadConfigFromTOML(data []byte) (Config, error) {
 }
 
 func LoadConfigFromEnv(cfg Config) Config {
-	if port := os.Getenv("AGENT_LOGGER_PORT"); port != "" {
+	if port := os.Getenv("LLM_PROXY_PORT"); port != "" {
 		if p, err := strconv.Atoi(port); err == nil {
 			cfg.Port = p
 		}
 	}
-	if logDir := os.Getenv("AGENT_LOGGER_LOG_DIR"); logDir != "" {
+	if logDir := os.Getenv("LLM_PROXY_LOG_DIR"); logDir != "" {
 		cfg.LogDir = logDir
 	}
 	return cfg

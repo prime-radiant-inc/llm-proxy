@@ -1,4 +1,4 @@
-module github.com/obra/transparent-agent-logger
+module github.com/obra/llm-proxy
 
 go 1.24.0
 

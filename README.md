@@ -1,4 +1,4 @@
-# Transparent Agent Logger
+# LLM Proxy
 
 A zero-config Go proxy that transparently logs all traffic between AI clients and their providers.
 
@@ -6,7 +6,7 @@ A zero-config Go proxy that transparently logs all traffic between AI clients an
 
 ```bash
 # Run with defaults (port 8080, logs in ./logs)
-./agent-logger
+./llm-proxy
 
 # Configure your client
 export ANTHROPIC_BASE_URL=http://localhost:8080/anthropic/api.anthropic.com
@@ -30,14 +30,14 @@ Supported providers:
 ### CLI Flags
 
 ```bash
-./agent-logger --port 9000 --log-dir /var/log/agent-logger
+./llm-proxy --port 9000 --log-dir /var/log/llm-proxy
 ```
 
 ### Environment Variables
 
 ```bash
-AGENT_LOGGER_PORT=9000
-AGENT_LOGGER_LOG_DIR=/var/log/agent-logger
+LLM_PROXY_PORT=9000
+LLM_PROXY_LOG_DIR=/var/log/llm-proxy
 ```
 
 ### Config File
@@ -45,7 +45,7 @@ AGENT_LOGGER_LOG_DIR=/var/log/agent-logger
 ```toml
 # config.toml
 port = 9000
-log_dir = "/var/log/agent-logger"
+log_dir = "/var/log/llm-proxy"
 ```
 
 Precedence: CLI flags > Environment variables > Config file > Defaults
@@ -64,7 +64,7 @@ Session tracking detects conversation continuations and forks.
 ## Building
 
 ```bash
-go build -o agent-logger .
+go build -o llm-proxy .
 ```
 
 ## Testing

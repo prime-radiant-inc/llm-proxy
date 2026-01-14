@@ -19,7 +19,7 @@ func TestDefaultConfig(t *testing.T) {
 func TestLoadConfigFromTOML(t *testing.T) {
 	tomlContent := `
 port = 9000
-log_dir = "/var/log/agent-logger"
+log_dir = "/var/log/llm-proxy"
 `
 	cfg, err := LoadConfigFromTOML([]byte(tomlContent))
 	if err != nil {
@@ -28,8 +28,8 @@ log_dir = "/var/log/agent-logger"
 	if cfg.Port != 9000 {
 		t.Errorf("expected port 9000, got %d", cfg.Port)
 	}
-	if cfg.LogDir != "/var/log/agent-logger" {
-		t.Errorf("expected log dir '/var/log/agent-logger', got %q", cfg.LogDir)
+	if cfg.LogDir != "/var/log/llm-proxy" {
+		t.Errorf("expected log dir '/var/log/llm-proxy', got %q", cfg.LogDir)
 	}
 }
 

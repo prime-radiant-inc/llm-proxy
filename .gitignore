@@ -1,6 +1,5 @@
 # Binary
-agent-logger
-transparent-agent-logger
+llm-proxy
 proxy-server
 
 # Logs

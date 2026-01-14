@@ -19,7 +19,7 @@ type CLIFlags struct {
 }
 
 func ParseCLIFlags(args []string) (CLIFlags, error) {
-	fs := flag.NewFlagSet("agent-logger", flag.ContinueOnError)
+	fs := flag.NewFlagSet("llm-proxy", flag.ContinueOnError)
 
 	var flags CLIFlags
 	fs.IntVar(&flags.Port, "port", 0, "Port to listen on")
@@ -76,7 +76,7 @@ func main() {
 		srv.Close()
 	}()
 
-	log.Printf("Starting transparent-agent-logger on %s", addr)
+	log.Printf("Starting llm-proxy on %s", addr)
 	log.Printf("Log directory: %s", cfg.LogDir)
 
 	if err := http.ListenAndServe(addr, srv); err != nil && err != http.ErrServerClosed {
