@@ -76,6 +76,7 @@ type ParsedTurn struct {
 	Response   *LogEntry
 	ReqParsed  ParsedRequest
 	RespParsed ParsedResponse
+	IsUtility  bool // True for utility requests (e.g., Haiku labeling)
 }
 
 func NewExplorer(logDir string) *Explorer {
@@ -375,10 +376,12 @@ func (e *Explorer) groupAndParseTurns(entries []LogEntry, host string) []ParsedT
 	for i := range entries {
 		entry := &entries[i]
 		if entry.Type == "request" {
+			reqParsed := ParseRequestBody(entry.Body, host)
 			turn := &ParsedTurn{
 				Seq:       entry.Seq,
 				Request:   entry,
-				ReqParsed: ParseRequestBody(entry.Body, host),
+				ReqParsed: reqParsed,
+				IsUtility: isUtilityRequest(reqParsed),
 			}
 			turnMap[entry.Seq] = turn
 			turns = append(turns, *turn)
@@ -399,6 +402,19 @@ func (e *Explorer) groupAndParseTurns(entries []LogEntry, host string) []ParsedT
 	}
 
 	return turns
+}
+
+// isUtilityRequest detects auxiliary API calls that aren't part of the main conversation
+// (e.g., Haiku model calls for session labeling)
+func isUtilityRequest(req ParsedRequest) bool {
+	// Haiku labeling requests
+	if strings.Contains(strings.ToLower(req.Model), "haiku") {
+		if strings.Contains(req.System, "new conversation topic") ||
+			strings.Contains(req.System, "isNewTopic") {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Explorer) handleSearch(w http.ResponseWriter, r *http.Request) {

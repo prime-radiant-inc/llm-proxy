@@ -20,6 +20,7 @@
         </header>
 
         {{range .Turns}}
+        {{if not .IsUtility}}
         <div class="turn">
             <!-- Request: User messages -->
             {{if .Request}}
@@ -31,10 +32,10 @@
                 </div>
 
                 {{if .ReqParsed.System}}
-                <div class="system-prompt">
-                    <strong>System:</strong>
+                <details class="system-prompt">
+                    <summary>System Prompt</summary>
                     <pre>{{.ReqParsed.System}}</pre>
-                </div>
+                </details>
                 {{end}}
 
                 {{range .ReqParsed.Messages}}
@@ -97,7 +98,8 @@
             </div>
             {{end}}
         </div>
-        {{end}}
+        {{end}}{{/* if not .IsUtility */}}
+        {{end}}{{/* range .Turns */}}
     </main>
 </body>
 </html>

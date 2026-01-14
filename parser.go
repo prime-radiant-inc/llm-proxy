@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 type ParsedRequest struct {
@@ -55,8 +56,21 @@ func ParseRequestBody(body string, host string) ParsedRequest {
 	if maxTokens, ok := raw["max_tokens"].(float64); ok {
 		parsed.MaxTokens = int(maxTokens)
 	}
+	// Handle system as string
 	if system, ok := raw["system"].(string); ok {
 		parsed.System = system
+	}
+	// Handle system as array of content blocks
+	if systemArr, ok := raw["system"].([]interface{}); ok {
+		var systemParts []string
+		for _, item := range systemArr {
+			if block, ok := item.(map[string]interface{}); ok {
+				if text, ok := block["text"].(string); ok {
+					systemParts = append(systemParts, text)
+				}
+			}
+		}
+		parsed.System = strings.Join(systemParts, "\n\n")
 	}
 
 	if messages, ok := raw["messages"].([]interface{}); ok {
