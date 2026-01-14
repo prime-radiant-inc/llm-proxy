@@ -72,10 +72,22 @@ func (s *SessionDB) CreateSession(id, provider, upstream, filePath string) error
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	_, err := s.db.Exec(`
-		INSERT INTO sessions (id, provider, upstream, created_at, last_activity, file_path)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO sessions (id, provider, upstream, created_at, last_activity, file_path, last_seq)
+		VALUES (?, ?, ?, ?, ?, ?, 1)
 	`, id, provider, upstream, now, now, filePath)
 
+	return err
+}
+
+// UpdateSessionSeq updates the session's last sequence number
+func (s *SessionDB) UpdateSessionSeq(sessionID string, seq int) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	_, err := s.db.Exec(`
+		UPDATE sessions
+		SET last_activity = ?, last_seq = ?
+		WHERE id = ?
+	`, now, seq, sessionID)
 	return err
 }
 
@@ -139,8 +151,8 @@ func (s *SessionDB) CreateSessionWithClientID(id, clientSessionID, provider, ups
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	_, err := s.db.Exec(`
-		INSERT INTO sessions (id, client_session_id, provider, upstream, created_at, last_activity, file_path)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO sessions (id, client_session_id, provider, upstream, created_at, last_activity, file_path, last_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 1)
 	`, id, clientSessionID, provider, upstream, now, now, filePath)
 
 	return err

@@ -166,24 +166,6 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, logger *Logger, 
 		logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, sw.chunks, timing, requestID)
 	}
 
-	// Record fingerprint for session continuation tracking
-	if sm != nil && sw.AccumulatedText() != "" {
-		// Build a synthetic response body for fingerprinting
-		// The accumulated text is the assistant's complete response
-		syntheticResponse := buildSyntheticResponse(sw.AccumulatedText(), provider)
-		sm.RecordResponse(sessionID, seq, reqBody, syntheticResponse, provider)
-	}
-
-	return nil
-}
-
-// buildSyntheticResponse creates a response body structure from accumulated streaming text
-func buildSyntheticResponse(text, provider string) []byte {
-	if provider == "anthropic" {
-		return []byte(`{"content":[{"type":"text","text":"` + escapeJSON(text) + `"}]}`)
-	} else if provider == "openai" {
-		return []byte(`{"choices":[{"message":{"role":"assistant","content":"` + escapeJSON(text) + `"}}]}`)
-	}
 	return nil
 }
 

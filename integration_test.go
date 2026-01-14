@@ -64,7 +64,7 @@ func TestProxySessionTracking(t *testing.T) {
 	}
 }
 
-func TestProxySessionContinuation(t *testing.T) {
+func TestProxySessionContinuationWithClientSessionID(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +81,61 @@ func TestProxySessionContinuation(t *testing.T) {
 	}
 	defer srv.Close()
 
-	// First request - new session
+	// First request - new session with client session ID (Anthropic format)
+	body1 := `{"messages":[{"role":"user","content":"hello"}],"metadata":{"user_id":"user_abc_session_test-session-456"}}`
+	req1 := httptest.NewRequest("POST", "/anthropic/"+upstreamHost+"/v1/messages", strings.NewReader(body1))
+	w1 := httptest.NewRecorder()
+	srv.ServeHTTP(w1, req1)
+
+	if w1.Code != 200 {
+		t.Fatalf("Expected 200, got %d: %s", w1.Code, w1.Body.String())
+	}
+
+	// Give logger time to flush
+	time.Sleep(50 * time.Millisecond)
+
+	// Second request with same client session ID - should continue same session
+	body2 := `{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi there"}]},{"role":"user","content":"how are you"}],"metadata":{"user_id":"user_abc_session_test-session-456"}}`
+	req2 := httptest.NewRequest("POST", "/anthropic/"+upstreamHost+"/v1/messages", strings.NewReader(body2))
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+
+	if w2.Code != 200 {
+		t.Fatalf("Expected 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+
+	// Wait for logging
+	time.Sleep(50 * time.Millisecond)
+
+	// Check log files - should have exactly 1 session file (same client session ID)
+	today := time.Now().Format("2006-01-02")
+	logFiles, err := filepath.Glob(filepath.Join(tmpDir, upstreamHost, today, "*.jsonl"))
+	if err != nil {
+		t.Fatalf("Failed to glob: %v", err)
+	}
+	if len(logFiles) != 1 {
+		t.Errorf("Expected 1 log file (same session), got %d", len(logFiles))
+	}
+}
+
+func TestProxyNoClientSessionIDCreatesNewSessions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"msg_123","content":[{"type":"text","text":"hi there"}]}`))
+	}))
+	defer upstream.Close()
+
+	upstreamHost := strings.TrimPrefix(upstream.URL, "http://")
+
+	srv, err := NewServer(Config{Port: 8080, LogDir: tmpDir})
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer srv.Close()
+
+	// First request without client session ID
 	body1 := `{"messages":[{"role":"user","content":"hello"}]}`
 	req1 := httptest.NewRequest("POST", "/anthropic/"+upstreamHost+"/v1/messages", strings.NewReader(body1))
 	w1 := httptest.NewRecorder()
@@ -94,9 +148,8 @@ func TestProxySessionContinuation(t *testing.T) {
 	// Give logger time to flush
 	time.Sleep(50 * time.Millisecond)
 
-	// Second request (continuation with prior messages matching first exchange)
-	// Assistant content must be array format to match what we stored from the response
-	body2 := `{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi there"}]},{"role":"user","content":"how are you"}]}`
+	// Second request also without client session ID - should NOT be merged
+	body2 := `{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi there"},{"role":"user","content":"how are you"}]}`
 	req2 := httptest.NewRequest("POST", "/anthropic/"+upstreamHost+"/v1/messages", strings.NewReader(body2))
 	w2 := httptest.NewRecorder()
 	srv.ServeHTTP(w2, req2)
@@ -108,14 +161,14 @@ func TestProxySessionContinuation(t *testing.T) {
 	// Wait for logging
 	time.Sleep(50 * time.Millisecond)
 
-	// Check log files - should have exactly 1 session file (continuation, not fork)
+	// Check log files - should have 2 separate session files (no merging without client session ID)
 	today := time.Now().Format("2006-01-02")
 	logFiles, err := filepath.Glob(filepath.Join(tmpDir, upstreamHost, today, "*.jsonl"))
 	if err != nil {
 		t.Fatalf("Failed to glob: %v", err)
 	}
-	if len(logFiles) != 1 {
-		t.Errorf("Expected 1 log file (same session), got %d", len(logFiles))
+	if len(logFiles) != 2 {
+		t.Errorf("Expected 2 log files (separate sessions without client ID), got %d", len(logFiles))
 	}
 }
 

@@ -202,11 +202,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			TotalMs: totalTime.Milliseconds(),
 		}
 		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, respBody, nil, timing, requestID)
-
-		// Record fingerprint for continuation tracking
-		if p.sessionManager != nil {
-			p.sessionManager.RecordResponse(sessionID, seq, reqBody, respBody, provider)
-		}
 	}
 
 	// Copy response headers
