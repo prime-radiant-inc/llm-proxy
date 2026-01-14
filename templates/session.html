@@ -14,31 +14,84 @@
         </form>
     </nav>
     <main>
-        <h2>Session: <code>{{.SessionID}}</code></h2>
+        <header class="session-header">
+            <h2>Session: <code>{{.SessionID}}</code></h2>
+            <span class="host">{{.Host}}</span>
+        </header>
 
         {{range .Turns}}
         <div class="turn">
+            <!-- Request: User messages -->
             {{if .Request}}
-            <div class="message request">
-                <div class="role">Request #{{.Request.Seq}}</div>
-                <div class="content">
-                    <pre>{{.Request.Body}}</pre>
+            <div class="message user">
+                <div class="meta">
+                    <span class="role">User</span>
+                    <span class="model">{{.ReqParsed.Model}}</span>
+                    <span class="seq">#{{.Seq}}</span>
                 </div>
+
+                {{if .ReqParsed.System}}
+                <div class="system-prompt">
+                    <strong>System:</strong>
+                    <pre>{{.ReqParsed.System}}</pre>
+                </div>
+                {{end}}
+
+                {{range .ReqParsed.Messages}}
+                    {{if eq .Role "user"}}
+                    <div class="content user-content">
+                        {{if .TextContent}}
+                            <pre class="text">{{.TextContent}}</pre>
+                        {{end}}
+                        {{range .Content}}
+                            {{if eq .Type "tool_result"}}
+                            <div class="tool-result">
+                                <div class="tool-header">Tool Result ({{.ToolID}})</div>
+                                <pre>{{.Text}}</pre>
+                            </div>
+                            {{end}}
+                        {{end}}
+                    </div>
+                    {{end}}
+                {{end}}
+
                 <details>
-                    <summary>Raw JSON</summary>
+                    <summary>Raw Request</summary>
                     <pre class="raw">{{.Request.Raw}}</pre>
                 </details>
             </div>
             {{end}}
 
+            <!-- Response: Assistant content -->
             {{if .Response}}
-            <div class="message response">
-                <div class="role">Response #{{.Response.Seq}} ({{.Response.Status}})</div>
-                <div class="content">
-                    <pre>{{.Response.Body}}</pre>
+            <div class="message assistant">
+                <div class="meta">
+                    <span class="role">Assistant</span>
+                    {{if .RespParsed.Usage.OutputTokens}}
+                    <span class="tokens">{{.RespParsed.Usage.InputTokens}} in / {{.RespParsed.Usage.OutputTokens}} out</span>
+                    {{end}}
                 </div>
+
+                {{range .RespParsed.Content}}
+                    {{if eq .Type "thinking"}}
+                    <details class="thinking-block">
+                        <summary>Thinking...</summary>
+                        <pre class="thinking">{{.Thinking}}</pre>
+                    </details>
+                    {{else if eq .Type "text"}}
+                    <div class="content assistant-content">
+                        <pre class="text">{{.Text}}</pre>
+                    </div>
+                    {{else if eq .Type "tool_use"}}
+                    <div class="tool-call">
+                        <div class="tool-header">{{.ToolName}}</div>
+                        <pre class="tool-input">{{printf "%v" .ToolInput}}</pre>
+                    </div>
+                    {{end}}
+                {{end}}
+
                 <details>
-                    <summary>Raw JSON</summary>
+                    <summary>Raw Response</summary>
                     <pre class="raw">{{.Response.Raw}}</pre>
                 </details>
             </div>

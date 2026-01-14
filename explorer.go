@@ -59,6 +59,14 @@ type ConversationTurn struct {
 	Response *LogEntry
 }
 
+type ParsedTurn struct {
+	Seq        int
+	Request    *LogEntry
+	Response   *LogEntry
+	ReqParsed  ParsedRequest
+	RespParsed ParsedResponse
+}
+
 func NewExplorer(logDir string) *Explorer {
 	tmpl := template.Must(template.ParseFS(templateFS, "templates/*.html"))
 
@@ -208,12 +216,21 @@ func (e *Explorer) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Group into conversation turns
-	turns := e.groupIntoTurns(entries)
+	// Get host from first entry that has it
+	host := ""
+	for _, entry := range entries {
+		if entry.Meta.Host != "" {
+			host = entry.Meta.Host
+			break
+		}
+	}
+
+	// Group and parse into conversation turns
+	turns := e.groupAndParseTurns(entries, host)
 
 	e.templates.ExecuteTemplate(w, "session.html", map[string]interface{}{
 		"SessionID": sessionID,
-		"Entries":   entries,
+		"Host":      host,
 		"Turns":     turns,
 	})
 }
@@ -305,6 +322,39 @@ func (e *Explorer) groupIntoTurns(entries []LogEntry) []ConversationTurn {
 				for j := range turns {
 					if turns[j].Request != nil && turns[j].Request.Seq == entry.Seq {
 						turns[j].Response = entry
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return turns
+}
+
+func (e *Explorer) groupAndParseTurns(entries []LogEntry, host string) []ParsedTurn {
+	var turns []ParsedTurn
+	turnMap := make(map[int]*ParsedTurn)
+
+	for i := range entries {
+		entry := &entries[i]
+		if entry.Type == "request" {
+			turn := &ParsedTurn{
+				Seq:       entry.Seq,
+				Request:   entry,
+				ReqParsed: ParseRequestBody(entry.Body, host),
+			}
+			turnMap[entry.Seq] = turn
+			turns = append(turns, *turn)
+		} else if entry.Type == "response" {
+			if turn, ok := turnMap[entry.Seq]; ok {
+				turn.Response = entry
+				turn.RespParsed = ParseResponseBody(entry.Body, host)
+				// Update in slice
+				for j := range turns {
+					if turns[j].Seq == entry.Seq {
+						turns[j].Response = entry
+						turns[j].RespParsed = turn.RespParsed
 						break
 					}
 				}

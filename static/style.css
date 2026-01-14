@@ -139,3 +139,115 @@ summary {
     font-size: 0.8rem;
     color: var(--text-muted);
 }
+
+.session-header {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+
+.session-header .host {
+    color: var(--text-muted);
+}
+
+.message.user {
+    background: var(--bg-secondary);
+}
+
+.message.assistant {
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+}
+
+.message .meta {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+}
+
+.message .role {
+    font-weight: bold;
+    color: var(--accent);
+}
+
+.message .model, .message .seq, .message .tokens {
+    color: var(--text-muted);
+}
+
+.content pre.text {
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+    font-family: system-ui, sans-serif;
+    line-height: 1.6;
+}
+
+.system-prompt {
+    background: rgba(255, 200, 0, 0.1);
+    border-left: 3px solid #fc0;
+    padding: 0.5rem 1rem;
+    margin-bottom: 1rem;
+}
+
+.system-prompt pre {
+    margin: 0.5rem 0 0 0;
+    white-space: pre-wrap;
+}
+
+.thinking-block {
+    background: rgba(100, 100, 100, 0.1);
+    border-left: 3px solid #888;
+    margin: 0.5rem 0;
+}
+
+.thinking-block summary {
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.thinking-block pre.thinking {
+    padding: 0.5rem 1rem;
+    margin: 0;
+    white-space: pre-wrap;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.tool-call, .tool-result {
+    background: rgba(74, 158, 255, 0.1);
+    border-left: 3px solid var(--accent);
+    margin: 0.5rem 0;
+    padding: 0.5rem 1rem;
+}
+
+.tool-header {
+    font-weight: bold;
+    margin-bottom: 0.5rem;
+}
+
+.tool-input, .tool-result pre {
+    margin: 0;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+}
+
+details summary {
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    margin-top: 1rem;
+}
+
+pre.raw {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 300px;
+    overflow-y: auto;
+}
