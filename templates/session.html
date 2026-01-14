@@ -19,90 +19,86 @@
             <span class="host">{{.Host}}</span>
         </header>
 
-        {{range .ModelGroups}}
-        <section class="model-group">
-            <h3 class="model-header">{{.Model}} <span class="turn-count">({{len .Turns}} turns)</span></h3>
-
-            {{range .Turns}}
-            <div class="turn">
-                <!-- Request: User messages -->
-                {{if .Request}}
-                <div class="message user">
-                    <div class="meta">
-                        <span class="role">User</span>
-                        <span class="seq">#{{.Seq}}</span>
-                    </div>
-
-                    {{if .ReqParsed.System}}
-                    <details class="system-prompt">
-                        <summary>System Prompt</summary>
-                        <pre>{{.ReqParsed.System}}</pre>
-                    </details>
-                    {{end}}
-
-                    {{range .ReqParsed.Messages}}
-                        {{if eq .Role "user"}}
-                        <div class="content user-content">
-                            {{if .TextContent}}
-                                <pre class="text">{{.TextContent}}</pre>
-                            {{end}}
-                            {{range .Content}}
-                                {{if eq .Type "tool_result"}}
-                                <div class="tool-result">
-                                    <div class="tool-header">Tool Result ({{.ToolID}})</div>
-                                    <pre>{{.Text}}</pre>
-                                </div>
-                                {{end}}
-                            {{end}}
-                        </div>
-                        {{end}}
-                    {{end}}
-
-                    <details>
-                        <summary>Raw Request</summary>
-                        <pre class="raw">{{.Request.Raw}}</pre>
-                    </details>
+        {{range .Turns}}
+        <div class="turn">
+            <!-- Request: User messages -->
+            {{if .Request}}
+            <div class="message user">
+                <div class="meta">
+                    <span class="role">User</span>
+                    <span class="model">{{.ReqParsed.Model}}</span>
+                    <span class="seq">#{{.Seq}}</span>
+                    {{if .RequestID}}<span class="request-id">{{.RequestID}}</span>{{end}}
                 </div>
+
+                {{if .ReqParsed.System}}
+                <details class="system-prompt">
+                    <summary>System Prompt</summary>
+                    <pre>{{.ReqParsed.System}}</pre>
+                </details>
                 {{end}}
 
-                <!-- Response: Assistant content -->
-                {{if .Response}}
-                <div class="message assistant">
-                    <div class="meta">
-                        <span class="role">Assistant</span>
-                        {{if .RespParsed.Usage.OutputTokens}}
-                        <span class="tokens">{{.RespParsed.Usage.InputTokens}} in / {{.RespParsed.Usage.OutputTokens}} out</span>
+                {{range .ReqParsed.Messages}}
+                    {{if eq .Role "user"}}
+                    <div class="content user-content">
+                        {{if .TextContent}}
+                            <pre class="text">{{.TextContent}}</pre>
+                        {{end}}
+                        {{range .Content}}
+                            {{if eq .Type "tool_result"}}
+                            <div class="tool-result">
+                                <div class="tool-header">Tool Result ({{.ToolID}})</div>
+                                <pre>{{.Text}}</pre>
+                            </div>
+                            {{end}}
                         {{end}}
                     </div>
-
-                    {{range .RespParsed.Content}}
-                        {{if eq .Type "thinking"}}
-                        <details class="thinking-block">
-                            <summary>Thinking...</summary>
-                            <pre class="thinking">{{.Thinking}}</pre>
-                        </details>
-                        {{else if eq .Type "text"}}
-                        <div class="content assistant-content">
-                            <pre class="text">{{.Text}}</pre>
-                        </div>
-                        {{else if eq .Type "tool_use"}}
-                        <div class="tool-call">
-                            <div class="tool-header">{{.ToolName}}</div>
-                            <pre class="tool-input">{{printf "%v" .ToolInput}}</pre>
-                        </div>
-                        {{end}}
                     {{end}}
-
-                    <details>
-                        <summary>Raw Response</summary>
-                        <pre class="raw">{{.Response.Raw}}</pre>
-                    </details>
-                </div>
                 {{end}}
+
+                <details>
+                    <summary>Raw Request</summary>
+                    <pre class="raw">{{.Request.Raw}}</pre>
+                </details>
             </div>
-            {{end}}{{/* range .Turns */}}
-        </section>
-        {{end}}{{/* range .ModelGroups */}}
+            {{end}}
+
+            <!-- Response: Assistant content -->
+            {{if .Response}}
+            <div class="message assistant">
+                <div class="meta">
+                    <span class="role">Assistant</span>
+                    {{if .RespParsed.Usage.OutputTokens}}
+                    <span class="tokens">{{.RespParsed.Usage.InputTokens}} in / {{.RespParsed.Usage.OutputTokens}} out</span>
+                    {{end}}
+                </div>
+
+                {{range .RespParsed.Content}}
+                    {{if eq .Type "thinking"}}
+                    <details class="thinking-block">
+                        <summary>Thinking...</summary>
+                        <pre class="thinking">{{.Thinking}}</pre>
+                    </details>
+                    {{else if eq .Type "text"}}
+                    <div class="content assistant-content">
+                        <pre class="text">{{.Text}}</pre>
+                    </div>
+                    {{else if eq .Type "tool_use"}}
+                    <div class="tool-call">
+                        <div class="tool-header">{{.ToolName}}</div>
+                        <pre class="tool-input">{{printf "%v" .ToolInput}}</pre>
+                    </div>
+                    {{end}}
+                {{end}}
+
+                <details>
+                    <summary>Raw Response</summary>
+                    <pre class="raw">{{.Response.Raw}}</pre>
+                </details>
+            </div>
+            {{end}}
+        </div>
+        {{end}}
     </main>
 </body>
 </html>

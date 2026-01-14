@@ -152,7 +152,7 @@ func (l *Logger) LogSessionStart(sessionID, provider, upstream string) error {
 	return l.writeEntry(sessionID, entry)
 }
 
-func (l *Logger) LogRequest(sessionID, provider string, seq int, method, path string, headers http.Header, body []byte) error {
+func (l *Logger) LogRequest(sessionID, provider string, seq int, method, path string, headers http.Header, body []byte, requestID string) error {
 	upstream := l.upstreams[sessionID]
 
 	entry := map[string]interface{}{
@@ -164,16 +164,17 @@ func (l *Logger) LogRequest(sessionID, provider string, seq int, method, path st
 		"body":    string(body),
 		"size":    len(body),
 		"_meta": map[string]interface{}{
-			"ts":      time.Now().UTC().Format(time.RFC3339Nano),
-			"machine": l.machineID,
-			"host":    upstream,
-			"session": sessionID,
+			"ts":         time.Now().UTC().Format(time.RFC3339Nano),
+			"machine":    l.machineID,
+			"host":       upstream,
+			"session":    sessionID,
+			"request_id": requestID,
 		},
 	}
 	return l.writeEntry(sessionID, entry)
 }
 
-func (l *Logger) LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming) error {
+func (l *Logger) LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string) error {
 	upstream := l.upstreams[sessionID]
 
 	entry := map[string]interface{}{
@@ -184,10 +185,11 @@ func (l *Logger) LogResponse(sessionID, provider string, seq int, status int, he
 		"timing":  timing,
 		"size":    len(body),
 		"_meta": map[string]interface{}{
-			"ts":      time.Now().UTC().Format(time.RFC3339Nano),
-			"machine": l.machineID,
-			"host":    upstream,
-			"session": sessionID,
+			"ts":         time.Now().UTC().Format(time.RFC3339Nano),
+			"machine":    l.machineID,
+			"host":       upstream,
+			"session":    sessionID,
+			"request_id": requestID,
 		},
 	}
 

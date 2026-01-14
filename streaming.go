@@ -130,7 +130,7 @@ func extractDeltaText(data []byte, provider string) string {
 
 // streamResponse handles streaming responses from upstream
 // NOTE: sessionManager param for future fingerprinting (Task 18)
-func streamResponse(w http.ResponseWriter, resp *http.Response, logger *Logger, sm *SessionManager, sessionID, provider string, seq int, startTime time.Time, reqBody []byte) error {
+func streamResponse(w http.ResponseWriter, resp *http.Response, logger *Logger, sm *SessionManager, sessionID, provider string, seq int, startTime time.Time, reqBody []byte, requestID string) error {
 	sw := NewStreamingResponseWriter(w, provider)
 
 	// Copy headers
@@ -163,7 +163,7 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, logger *Logger, 
 			TTFBMs:  ttfb,
 			TotalMs: time.Since(startTime).Milliseconds(),
 		}
-		logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, sw.chunks, timing)
+		logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, sw.chunks, timing, requestID)
 	}
 
 	// Record fingerprint for session continuation tracking

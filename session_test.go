@@ -120,30 +120,30 @@ func TestForkCopiesLogCorrectly(t *testing.T) {
 
 	// Log session start and first request
 	logger.LogSessionStart(sessionID1, "anthropic", "api.anthropic.com")
-	logger.LogRequest(sessionID1, "anthropic", 1, "POST", "/v1/messages", nil, body1)
+	logger.LogRequest(sessionID1, "anthropic", 1, "POST", "/v1/messages", nil, body1, "req-1")
 
 	// Record response for seq 1
 	response1 := []byte(`{"content":[{"type":"text","text":"hi"}]}`)
 	sm.RecordResponse(sessionID1, 1, body1, response1, "anthropic")
 
 	// Log response
-	logger.LogResponse(sessionID1, "anthropic", 1, 200, nil, response1, nil, ResponseTiming{})
+	logger.LogResponse(sessionID1, "anthropic", 1, 200, nil, response1, nil, ResponseTiming{}, "req-1")
 
 	// Second exchange (assistant content as array)
 	body2 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi"}]},{"role":"user","content":"option A"}]}`)
 	sm.GetOrCreateSession(body2, "anthropic", "api.anthropic.com", nil, "/v1/messages")
-	logger.LogRequest(sessionID1, "anthropic", 2, "POST", "/v1/messages", nil, body2)
+	logger.LogRequest(sessionID1, "anthropic", 2, "POST", "/v1/messages", nil, body2, "req-2")
 	response2 := []byte(`{"content":[{"type":"text","text":"you chose A"}]}`)
 	sm.RecordResponse(sessionID1, 2, body2, response2, "anthropic")
-	logger.LogResponse(sessionID1, "anthropic", 2, 200, nil, response2, nil, ResponseTiming{})
+	logger.LogResponse(sessionID1, "anthropic", 2, 200, nil, response2, nil, ResponseTiming{}, "req-2")
 
 	// Third exchange (assistant content as array)
 	body3 := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi"}]},{"role":"user","content":"option A"},{"role":"assistant","content":[{"type":"text","text":"you chose A"}]},{"role":"user","content":"more stuff"}]}`)
 	sm.GetOrCreateSession(body3, "anthropic", "api.anthropic.com", nil, "/v1/messages")
-	logger.LogRequest(sessionID1, "anthropic", 3, "POST", "/v1/messages", nil, body3)
+	logger.LogRequest(sessionID1, "anthropic", 3, "POST", "/v1/messages", nil, body3, "req-3")
 	response3 := []byte(`{"content":[{"type":"text","text":"ok"}]}`)
 	sm.RecordResponse(sessionID1, 3, body3, response3, "anthropic")
-	logger.LogResponse(sessionID1, "anthropic", 3, 200, nil, response3, nil, ResponseTiming{})
+	logger.LogResponse(sessionID1, "anthropic", 3, 200, nil, response3, nil, ResponseTiming{}, "req-3")
 
 	// Fork from seq 1 (take option B instead of option A)
 	bodyFork := []byte(`{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":"hi"}]},{"role":"user","content":"option B"}]}`)

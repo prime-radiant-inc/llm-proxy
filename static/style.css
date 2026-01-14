@@ -306,22 +306,11 @@ pre.raw {
     border-radius: 4px;
 }
 
-.model-group {
-    margin: 2rem 0;
-    padding: 1rem;
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 8px;
-}
-
-.model-header {
-    color: var(--accent);
-    margin: 0 0 1rem 0;
-    padding-bottom: 0.5rem;
-    border-bottom: 1px solid var(--border);
-}
-
-.model-header .turn-count {
+.request-id {
+    font-family: monospace;
+    font-size: 0.75rem;
     color: var(--text-muted);
-    font-weight: normal;
-    font-size: 0.9rem;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 0.15rem 0.4rem;
+    border-radius: 3px;
 }

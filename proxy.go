@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type Proxy struct {
@@ -129,9 +131,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var sessionID string
 	var seq int
 	var isNewSession bool
+	var requestID string
 	shouldLog := p.logger != nil && isConversationEndpoint(path)
 
 	if shouldLog {
+		// Generate unique request ID for this API call
+		requestID = uuid.New().String()
+
 		if p.sessionManager != nil {
 			var err error
 			sessionID, seq, isNewSession, err = p.sessionManager.GetOrCreateSession(reqBody, provider, upstream, r.Header, path)
@@ -152,7 +158,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if isNewSession {
 			p.logger.LogSessionStart(sessionID, provider, upstream)
 		}
-		p.logger.LogRequest(sessionID, provider, seq, r.Method, path, r.Header, reqBody)
+		p.logger.LogRequest(sessionID, provider, seq, r.Method, path, r.Header, reqBody, requestID)
 	}
 
 	// Make request to upstream
@@ -171,7 +177,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			loggerForStream = p.logger
 			smForStream = p.sessionManager
 		}
-		streamResponse(w, resp, loggerForStream, smForStream, sessionID, provider, seq, startTime, reqBody)
+		streamResponse(w, resp, loggerForStream, smForStream, sessionID, provider, seq, startTime, reqBody, requestID)
 		return
 	}
 
@@ -195,7 +201,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			TTFBMs:  ttfb.Milliseconds(),
 			TotalMs: totalTime.Milliseconds(),
 		}
-		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, respBody, nil, timing)
+		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, respBody, nil, timing, requestID)
 
 		// Record fingerprint for continuation tracking
 		if p.sessionManager != nil {

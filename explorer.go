@@ -52,6 +52,7 @@ type EntryMeta struct {
 	Machine   string
 	Host      string
 	Session   string
+	RequestID string
 }
 
 type ConversationTurn struct {
@@ -72,15 +73,11 @@ type SearchResult struct {
 
 type ParsedTurn struct {
 	Seq        int
+	RequestID  string
 	Request    *LogEntry
 	Response   *LogEntry
 	ReqParsed  ParsedRequest
 	RespParsed ParsedResponse
-}
-
-type ModelGroup struct {
-	Model string
-	Turns []ParsedTurn
 }
 
 func NewExplorer(logDir string) *Explorer {
@@ -269,13 +266,10 @@ func (e *Explorer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// Group and parse into conversation turns
 	turns := e.groupAndParseTurns(entries, host)
 
-	// Group turns by model
-	modelGroups := e.groupByModel(turns)
-
 	e.templates.ExecuteTemplate(w, "session.html", map[string]interface{}{
-		"SessionID":   sessionID,
-		"Host":        host,
-		"ModelGroups": modelGroups,
+		"SessionID": sessionID,
+		"Host":      host,
+		"Turns":     turns,
 	})
 }
 
@@ -341,6 +335,9 @@ func (e *Explorer) parseSessionFile(path string) ([]LogEntry, error) {
 			if s, ok := meta["session"].(string); ok {
 				entry.Meta.Session = s
 			}
+			if r, ok := meta["request_id"].(string); ok {
+				entry.Meta.RequestID = r
+			}
 		}
 
 		entries = append(entries, entry)
@@ -386,6 +383,7 @@ func (e *Explorer) groupAndParseTurns(entries []LogEntry, host string) []ParsedT
 			reqParsed := ParseRequestBody(entry.Body, host)
 			turn := &ParsedTurn{
 				Seq:       entry.Seq,
+				RequestID: entry.Meta.RequestID,
 				Request:   entry,
 				ReqParsed: reqParsed,
 			}
@@ -408,34 +406,6 @@ func (e *Explorer) groupAndParseTurns(entries []LogEntry, host string) []ParsedT
 	}
 
 	return turns
-}
-
-// groupByModel groups turns by their requested model, preserving order within each group
-func (e *Explorer) groupByModel(turns []ParsedTurn) []ModelGroup {
-	// Use a map to collect turns by model, and a slice to preserve first-seen order
-	modelMap := make(map[string]*ModelGroup)
-	var modelOrder []string
-
-	for _, turn := range turns {
-		model := turn.ReqParsed.Model
-		if model == "" {
-			model = "unknown"
-		}
-
-		if _, exists := modelMap[model]; !exists {
-			modelMap[model] = &ModelGroup{Model: model}
-			modelOrder = append(modelOrder, model)
-		}
-		modelMap[model].Turns = append(modelMap[model].Turns, turn)
-	}
-
-	// Build result in first-seen order
-	var groups []ModelGroup
-	for _, model := range modelOrder {
-		groups = append(groups, *modelMap[model])
-	}
-
-	return groups
 }
 
 func (e *Explorer) handleSearch(w http.ResponseWriter, r *http.Request) {

@@ -32,7 +32,7 @@ func TestLoggerWritesJSONL(t *testing.T) {
 
 	// Log a request
 	headers := http.Header{"X-Api-Key": []string{"sk-ant-secret123456"}}
-	err = logger.LogRequest(sessionID, provider, 1, "POST", "/v1/messages", headers, []byte(`{"test":"data"}`))
+	err = logger.LogRequest(sessionID, provider, 1, "POST", "/v1/messages", headers, []byte(`{"test":"data"}`), "test-request-id")
 	if err != nil {
 		t.Fatalf("Failed to log request: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestLoggerResponseWithTiming(t *testing.T) {
 		TotalMs: 1200,
 	}
 
-	err = logger.LogResponse(sessionID, provider, 1, 200, http.Header{}, []byte(`{"response":"ok"}`), nil, timing)
+	err = logger.LogResponse(sessionID, provider, 1, 200, http.Header{}, []byte(`{"response":"ok"}`), nil, timing, "test-request-id")
 	if err != nil {
 		t.Fatalf("Failed to log response: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestLogEntryHasMeta(t *testing.T) {
 	upstream := "api.anthropic.com"
 
 	logger.LogSessionStart(sessionID, "anthropic", upstream)
-	logger.LogRequest(sessionID, "anthropic", 1, "POST", "/v1/messages", nil, []byte(`{}`))
+	logger.LogRequest(sessionID, "anthropic", 1, "POST", "/v1/messages", nil, []byte(`{}`), "test-request-id")
 
 	today := time.Now().Format("2006-01-02")
 	logPath := filepath.Join(tmpDir, upstream, today, sessionID+".jsonl")
@@ -179,6 +179,9 @@ func TestLogEntryHasMeta(t *testing.T) {
 	}
 	if _, ok := meta["session"]; !ok {
 		t.Error("_meta missing session field")
+	}
+	if _, ok := meta["request_id"]; !ok {
+		t.Error("_meta missing request_id field")
 	}
 
 	// Verify machine format is user@host
