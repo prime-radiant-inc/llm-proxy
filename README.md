@@ -11,13 +11,17 @@ brew install prime-radiant-inc/tap/llm-proxy
 brew services start llm-proxy
 ```
 
+Restart your shell, and you're done.
+
 ### Linux
 
 ```bash
-curl -fsSL https://llm-proxy.dev/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/prime-radiant-inc/llm-proxy/main/scripts/install.sh | sh
 ```
 
-Restart your shell, and you're done. All LLM traffic is now logged.
+Restart your shell, and you're done.
+
+All LLM traffic is now logged to `~/.llm-provider-logs/`.
 
 ## What It Does
 
