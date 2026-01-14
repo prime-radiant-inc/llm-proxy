@@ -50,6 +50,13 @@ func TestParseProxyURL(t *testing.T) {
 			path:    "/health",
 			wantErr: true,
 		},
+		{
+			name:     "chatgpt backend api",
+			path:     "/openai/chatgpt.com/backend-api/codex/v1/responses",
+			wantProv: "openai",
+			wantUp:   "chatgpt.com",
+			wantPath: "/backend-api/codex/v1/responses",
+		},
 	}
 
 	for _, tt := range tests {

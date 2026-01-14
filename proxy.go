@@ -239,5 +239,11 @@ func isConversationEndpoint(path string) bool {
 		}
 	}
 
+	// ChatGPT backend API (used with OAuth authentication)
+	// Paths like /backend-api/codex/v1/responses
+	if strings.HasPrefix(path, "/backend-api/") && strings.HasSuffix(path, "/responses") {
+		return true
+	}
+
 	return false
 }

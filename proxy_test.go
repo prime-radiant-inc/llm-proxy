@@ -139,6 +139,11 @@ func TestIsConversationEndpoint(t *testing.T) {
 		{"/v1/threads/thread_abc123/runs", true},
 		{"/v1/threads/thread_abc123/runs/run_xyz/steps", true},
 
+		// ChatGPT backend API (OAuth authentication)
+		{"/backend-api/codex/v1/responses", true},
+		{"/backend-api/responses", true},
+		{"/backend-api/v1/responses", true},
+
 		// Non-conversation endpoints (should NOT log)
 		{"/v1/messages/count_tokens", false},
 		{"/v1/models", false},
@@ -150,6 +155,7 @@ func TestIsConversationEndpoint(t *testing.T) {
 		{"/v1/conversations", false}, // CRUD operations only
 		{"/v1/assistants", false},
 		{"/v1/vector_stores", false},
+		{"/backend-api/codex/v1/models", false}, // Non-conversation ChatGPT backend endpoint
 	}
 
 	for _, tt := range tests {
