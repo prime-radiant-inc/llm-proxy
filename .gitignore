@@ -1,6 +1,10 @@
 # Binary
 agent-logger
 transparent-agent-logger
+proxy-server
+
+# Logs
+logs/
 
 # Test artifacts
 test-logs/
