@@ -9,8 +9,9 @@ import (
 )
 
 type Config struct {
-	Port   int    `toml:"port"`
-	LogDir string `toml:"log_dir"`
+	Port        int    `toml:"port"`
+	LogDir      string `toml:"log_dir"`
+	ServiceMode bool   `toml:"-"` // CLI-only, not persisted in config file
 }
 
 func DefaultConfig() Config {
