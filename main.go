@@ -20,6 +20,7 @@ type CLIFlags struct {
 	ConfigPath  string
 	ServiceMode bool
 	SetupShell  bool
+	Env         bool
 }
 
 func ParseCLIFlags(args []string) (CLIFlags, error) {
@@ -31,6 +32,7 @@ func ParseCLIFlags(args []string) (CLIFlags, error) {
 	fs.StringVar(&flags.ConfigPath, "config", "", "Path to config file")
 	fs.BoolVar(&flags.ServiceMode, "service", false, "Run as background service (dynamic port, write portfile)")
 	fs.BoolVar(&flags.SetupShell, "setup-shell", false, "Configure shell integration and exit")
+	fs.BoolVar(&flags.Env, "env", false, "Output environment variables for shell eval and exit")
 
 	if err := fs.Parse(args); err != nil {
 		return CLIFlags{}, err
@@ -52,6 +54,9 @@ func MergeConfig(cfg Config, flags CLIFlags) Config {
 	if flags.SetupShell {
 		cfg.SetupShell = true
 	}
+	if flags.Env {
+		cfg.Env = true
+	}
 	return cfg
 }
 
@@ -70,16 +75,38 @@ func main() {
 
 	cfg = MergeConfig(cfg, flags)
 
+	// Handle --env: output environment variables for shell eval and exit
+	if cfg.Env {
+		// Read portfile
+		port, err := ReadPortfile(DefaultPortfilePath())
+		if err != nil {
+			// Proxy not configured, output nothing
+			os.Exit(0)
+		}
+
+		// Health check
+		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/health", port))
+		if err != nil || resp.StatusCode != 200 {
+			// Proxy not running, output nothing
+			if resp != nil {
+				resp.Body.Close()
+			}
+			os.Exit(0)
+		}
+		resp.Body.Close()
+
+		// Output exports
+		fmt.Printf("export ANTHROPIC_BASE_URL=\"http://localhost:%d/anthropic/api.anthropic.com\"\n", port)
+		fmt.Printf("export OPENAI_BASE_URL=\"http://localhost:%d/openai/api.openai.com\"\n", port)
+		os.Exit(0)
+	}
+
 	// Handle --setup-shell: configure shell integration and exit
 	if cfg.SetupShell {
-		if err := WriteEnvScript(); err != nil {
-			log.Fatalf("Failed to write env script: %v", err)
-		}
 		if err := PatchAllShells(); err != nil {
 			log.Fatalf("Failed to patch shell rc: %v", err)
 		}
-		fmt.Println("Shell configuration complete.")
-		fmt.Printf("Restart your shell or run: source %s\n", EnvScriptPath())
+		fmt.Println("Shell configuration complete. Restart your shell to activate.")
 		os.Exit(0)
 	}
 

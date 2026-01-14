@@ -33,3 +33,16 @@ func TestParseCLIFlagsDefaults(t *testing.T) {
 		t.Errorf("expected port 0 (unset), got %d", flags.Port)
 	}
 }
+
+func TestParseCLIFlagsEnv(t *testing.T) {
+	args := []string{"--env"}
+
+	flags, err := ParseCLIFlags(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !flags.Env {
+		t.Error("expected Env flag to be true")
+	}
+}
