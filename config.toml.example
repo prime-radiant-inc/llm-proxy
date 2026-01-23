@@ -7,3 +7,32 @@ port = 8080
 # Directory for log files (default: ./logs)
 # sessions.db is stored inside this directory
 log_dir = "./logs"
+
+# Loki log export configuration
+# Pushes logs to Grafana Loki for centralized observability
+[loki]
+# Enable Loki export (default: false)
+enabled = false
+
+# Full Loki push endpoint URL (required when enabled)
+# Example: http://sen-monitoring:3100/loki/api/v1/push
+url = ""
+
+# Bearer token for authentication (optional)
+auth_token = ""
+
+# Number of entries to batch before sending (default: 1000)
+batch_size = 1000
+
+# Maximum time to wait before sending a partial batch (default: "5s")
+batch_wait = "5s"
+
+# Maximum retry attempts for failed pushes (default: 5)
+retry_max = 5
+
+# Enable gzip compression for requests (default: true)
+use_gzip = true
+
+# Environment label for Loki (default: "development")
+# Used as a label in Loki queries (e.g., development, staging, production)
+environment = "development"
