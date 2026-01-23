@@ -81,7 +81,8 @@ Client → llm-proxy → Upstream API
 ### FR3: Configuration
 New config fields:
 - `loki_enabled` (bool, default: false)
-- `loki_url` (string)
+- `loki_url` (string) - Full push endpoint URL, e.g., `http://sen-monitoring:3100/loki/api/v1/push`
+- `loki_auth_token` (string, optional) - Bearer token for future auth support
 - `loki_batch_size` (int, default: 1000)
 - `loki_batch_wait` (string, default: "5s")
 - `loki_retry_max` (int, default: 5)
@@ -89,6 +90,8 @@ New config fields:
 - `loki_environment` (string, default: "development")
 
 Environment variables with `LLM_PROXY_LOKI_` prefix.
+
+**URL is full endpoint** - Users provide complete URL including `/loki/api/v1/push` path. No path manipulation by the proxy.
 
 ### FR4: Health Endpoint
 - Add `/health/loki` endpoint

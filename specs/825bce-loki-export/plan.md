@@ -42,11 +42,12 @@ Add Loki configuration struct and environment variable loading to config.go. Thi
 - `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/config.toml.example`
 
 **Implementation Details:**
-1. Add `LokiConfig` struct with fields: Enabled, URL, BatchSize, BatchWaitStr, RetryMax, UseGzip, Environment
+1. Add `LokiConfig` struct with fields: Enabled, URL, AuthToken, BatchSize, BatchWaitStr, RetryMax, UseGzip, Environment
 2. Add `Loki LokiConfig` field to `Config` struct
 3. Add defaults in `DefaultConfig()`: Enabled=false, BatchSize=1000, BatchWaitStr="5s", RetryMax=5, UseGzip=true, Environment="development"
-4. Add environment variable loading in `LoadConfigFromEnv()` for `LLM_PROXY_LOKI_*` prefix
+4. Add environment variable loading in `LoadConfigFromEnv()` for `LLM_PROXY_LOKI_*` prefix (including `LLM_PROXY_LOKI_AUTH_TOKEN`)
 5. Update config.toml.example with Loki section
+6. URL is full endpoint (e.g., `http://sen-monitoring:3100/loki/api/v1/push`) - no path manipulation
 
 **Acceptance Criteria:**
 - [ ] LokiConfig struct defined with all fields from FR3
@@ -60,6 +61,7 @@ Add Loki configuration struct and environment variable loading to config.go. Thi
 - `TestDefaultConfig_LokiDefaults` - verify defaults match FR3
 - `TestLoadConfigFromEnv_LokiEnabled` - test boolean env var
 - `TestLoadConfigFromEnv_LokiURL` - test string env var
+- `TestLoadConfigFromEnv_LokiAuthToken` - test auth token env var
 - `TestLoadConfigFromEnv_LokiBatchSize` - test int env var
 - `TestLoadConfigFromTOML_LokiSection` - test TOML parsing
 
@@ -83,13 +85,13 @@ Create the core async Loki client (FR1) that batches log entries and pushes to L
 - `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/loki_exporter_test.go`
 
 **Implementation Details:**
-1. Define `LokiExporterConfig` struct with URL, BatchSize, BatchWait, RetryMax, RetryWait, Environment, BufferSize
+1. Define `LokiExporterConfig` struct with URL, AuthToken, BatchSize, BatchWait, RetryMax, RetryWait, Environment, BufferSize
 2. Define `LokiExporter` struct with buffered channel (10,000 capacity), stats counters (atomic)
 3. Implement `NewLokiExporter(cfg)` - validates config, starts background worker
 4. Implement `Push(entry, provider)` - non-blocking send to channel, drops if full
 5. Implement `run()` - background worker that batches by size (1000) or time (5s)
 6. Implement `sendBatch()` - groups by labels, formats Loki push request, retries with exponential backoff
-7. Implement `doSend()` - HTTP POST with gzip compression
+7. Implement `doSend()` - HTTP POST with gzip compression, add `Authorization: Bearer <token>` header if AuthToken configured
 8. Implement `Close()` - signals shutdown, drains channel, flushes final batch (30s timeout)
 9. Implement `Stats()` - returns entries_sent, entries_failed, entries_dropped, batches_sent
 
@@ -121,6 +123,8 @@ Create the core async Loki client (FR1) that batches log entries and pushes to L
 **Test Cases:**
 - `TestNewLokiExporter_RequiresURL` - error if URL empty
 - `TestNewLokiExporter_DefaultValues` - validates sensible defaults
+- `TestDoSend_AuthTokenHeader` - adds Authorization header when token configured
+- `TestDoSend_NoAuthToken` - no Authorization header when token empty
 - `TestPush_AddsToChannel` - entry queued successfully
 - `TestPush_DropsWhenChannelFull` - increments dropped counter
 - `TestPush_ExtractsTimestamp` - parses _meta.ts or uses now
