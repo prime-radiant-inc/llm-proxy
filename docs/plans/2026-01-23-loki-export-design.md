@@ -102,10 +102,11 @@ type LokiExporter struct {
     labels      map[string]string  // Static labels for all entries
     entries     chan lokiEntry     // Buffered channel (capacity: 10000)
     client      *http.Client
-    batchSize   int                // Default: 100
+    batchSize   int                // Default: 1000 (optimized for Loki efficiency)
     batchWait   time.Duration      // Default: 5s
-    retryMax    int                // Default: 3
-    retryWait   time.Duration      // Default: 1s (doubles each retry)
+    retryMax    int                // Default: 5
+    retryWait   time.Duration      // Default: 100ms (doubles each retry, max 10s)
+    useGzip     bool               // Default: true (compress JSON payloads)
     wg          sync.WaitGroup
     shutdown    chan struct{}
     mu          sync.Mutex
@@ -250,6 +251,7 @@ type Config struct {
     LokiBatchSize   int    `toml:"loki_batch_size"`
     LokiBatchWait   string `toml:"loki_batch_wait"`  // Duration string
     LokiRetryMax    int    `toml:"loki_retry_max"`
+    LokiUseGzip     bool   `toml:"loki_use_gzip"`
     LokiEnvironment string `toml:"loki_environment"`
 }
 
@@ -259,9 +261,10 @@ func DefaultConfig() Config {
         LogDir:          "./logs",
         LokiEnabled:     false,
         LokiURL:         "",
-        LokiBatchSize:   100,
+        LokiBatchSize:   1000,       // Optimized for Loki efficiency
         LokiBatchWait:   "5s",
-        LokiRetryMax:    3,
+        LokiRetryMax:    5,          // More resilience for transient failures
+        LokiUseGzip:     true,       // Compress JSON payloads
         LokiEnvironment: "development",
     }
 }
@@ -273,9 +276,10 @@ func DefaultConfig() Config {
 |----------|-------------|---------|
 | `LLM_PROXY_LOKI_ENABLED` | Enable Loki export | `false` |
 | `LLM_PROXY_LOKI_URL` | Loki push endpoint | (none) |
-| `LLM_PROXY_LOKI_BATCH_SIZE` | Entries per batch | `100` |
+| `LLM_PROXY_LOKI_BATCH_SIZE` | Entries per batch | `1000` |
 | `LLM_PROXY_LOKI_BATCH_WAIT` | Max wait before flush | `5s` |
-| `LLM_PROXY_LOKI_RETRY_MAX` | Retries on failure | `3` |
+| `LLM_PROXY_LOKI_RETRY_MAX` | Retries on failure | `5` |
+| `LLM_PROXY_LOKI_USE_GZIP` | Compress JSON payloads | `true` |
 | `LLM_PROXY_LOKI_ENVIRONMENT` | Environment label | `development` |
 
 **Example config.toml:**
@@ -287,9 +291,10 @@ log_dir = "~/.llm-provider-logs"
 [loki]
 enabled = true
 url = "http://sen-monitoring:3100/loki/api/v1/push"
-batch_size = 100
+batch_size = 1000
 batch_wait = "5s"
-retry_max = 3
+retry_max = 5
+use_gzip = true
 environment = "production"
 ```
 
@@ -397,7 +402,9 @@ This is out of scope for Phase 1 but the llm-proxy changes are compatible.
    - `TestPush_DropsWhenFull`
    - `TestBatching_SizeThreshold`
    - `TestBatching_TimeThreshold`
-   - `TestRetry_ExponentialBackoff`
+   - `TestRetry_ExponentialBackoffWithJitter`
+   - `TestRetry_MaxBackoffCap`
+   - `TestGzipCompression`
    - `TestClose_FlushesRemaining`
 
 2. **MultiWriter**
@@ -499,23 +506,41 @@ sum by (machine) (count_over_time({app="llm-proxy"} | json | type="request" [1h]
 
 ---
 
-## Open Questions
+## Resolved Questions
 
 1. **Body truncation for Loki?**
-   - Full bodies can be 100KB+ (streaming responses)
-   - Option A: Full bodies (best debugging, most storage)
-   - Option B: Truncate to 10KB
-   - Option C: Metadata only (timing, status, tokens)
-   - **Recommendation:** Start with full bodies, add truncation config later if needed
+   - **Decision:** Full bodies (no truncation). We need complete prompt data for debugging.
+   - Loki 3.0 default max line size is 256KB, our 100KB bodies fit comfortably.
 
 2. **Health endpoint for Loki connectivity?**
-   - Add `/health/loki` endpoint showing connection status + stats?
-   - Useful for debugging but adds complexity
+   - **Decision:** Add `/health/loki` endpoint showing connection status + stats.
+   - Returns: `status`, `entries_sent`, `entries_dropped`, `last_error`, `last_error_time`
 
 3. **Metrics export?**
-   - Export `llm_proxy_loki_*` Prometheus metrics?
-   - entries_sent, entries_dropped, batch_latency, etc.
-   - Out of scope for Phase 1
+   - **Decision:** Out of scope for Phase 1. Stats available via health endpoint.
+
+4. **Security (TLS/Auth)?**
+   - **Decision:** Tailscale + VPC isolation is sufficient for now.
+   - Local engineers use Tailscale; containers use VPC-internal access.
+   - Loki stays at `auth_enabled: false` for Phase 1.
+
+5. **Retry strategy improvements?**
+   - **Decision:** Increase retries from 3 to 5, add jitter to prevent thundering herd.
+   - Backoff: 100ms base, doubles each retry, max 10s, +25% random jitter.
+
+6. **Compression?**
+   - **Decision:** Enable gzip compression by default for JSON payloads.
+   - Significant bandwidth savings for 100KB+ response bodies.
+
+7. **Direct Loki Push vs. Promtail?**
+   - **Decision:** Direct Loki push (not Promtail pattern).
+   - Reasoning:
+     - Lower latency (~5s vs ~15s with Promtail)
+     - Full label control for session correlation
+     - Can use Loki 3.0 structured metadata
+     - llm-proxy is infrastructure, not application - different pattern is justified
+     - JSONL files remain primary; memory buffer loss on crash is acceptable
+   - Trade-off: Inconsistent with PA/scheduler/dashboard (which use Promtail), but llm-proxy is a special case.
 
 ---
 

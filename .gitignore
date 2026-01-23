@@ -16,3 +16,6 @@ evidence/
 test-threading.sh
 sqlite3
 echo
+
+# Spectacular parallel execution worktrees
+.worktrees/
