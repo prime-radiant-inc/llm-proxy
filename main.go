@@ -261,6 +261,11 @@ func main() {
 
 	log.Printf("Starting llm-proxy on :%d", actualPort)
 	log.Printf("Log directory: %s", cfg.LogDir)
+	if cfg.Loki.Enabled {
+		log.Printf("Loki export: enabled (%s)", cfg.Loki.URL)
+	} else {
+		log.Printf("Loki export: disabled")
+	}
 
 	if err := http.Serve(listener, srv); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
