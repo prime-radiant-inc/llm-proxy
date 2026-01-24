@@ -15,7 +15,7 @@ log_dir = "./logs"
 enabled = false
 
 # Full Loki push endpoint URL (required when enabled)
-# Example: http://sen-monitoring:3100/loki/api/v1/push
+# Example: http://loki.example.com:3100/loki/api/v1/push
 url = ""
 
 # Bearer token for authentication (optional)

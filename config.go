@@ -11,7 +11,7 @@ import (
 // LokiConfig holds configuration for Loki log export
 type LokiConfig struct {
 	Enabled      bool   `toml:"enabled"`
-	URL          string `toml:"url"`          // Full push endpoint URL, e.g., http://sen-monitoring:3100/loki/api/v1/push
+	URL          string `toml:"url"`          // Full push endpoint URL, e.g., http://loki.example.com:3100/loki/api/v1/push
 	AuthToken    string `toml:"auth_token"`   // Bearer token for auth (optional)
 	BatchSize    int    `toml:"batch_size"`   // Number of entries per batch
 	BatchWaitStr string `toml:"batch_wait"`   // Duration string for batch timeout

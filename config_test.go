@@ -91,7 +91,7 @@ func TestLoadConfigFromEnv_LokiEnabled(t *testing.T) {
 }
 
 func TestLoadConfigFromEnv_LokiURL(t *testing.T) {
-	testURL := "http://sen-monitoring:3100/loki/api/v1/push"
+	testURL := "http://loki.example.com:3100/loki/api/v1/push"
 	os.Setenv("LLM_PROXY_LOKI_URL", testURL)
 	defer os.Unsetenv("LLM_PROXY_LOKI_URL")
 

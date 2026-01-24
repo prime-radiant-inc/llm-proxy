@@ -744,7 +744,7 @@ if cfg.Loki.Enabled {
 ### Unit Test Commands
 
 ```bash
-cd /Users/drewritter/prime-rad/sen/llm-proxy
+# From project root:
 
 # Run all tests
 go test -v ./...

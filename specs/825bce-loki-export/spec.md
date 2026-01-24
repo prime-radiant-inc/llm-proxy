@@ -36,7 +36,7 @@ Client → llm-proxy → Upstream API
               ├──────────────────┐
               ▼                  ▼
          JSONL files      Loki (async)
-         (unchanged)      http://sen-monitoring:3100
+         (unchanged)      http://loki.example.com:3100
 ```
 
 ### Component Diagram
@@ -81,7 +81,7 @@ Client → llm-proxy → Upstream API
 ### FR3: Configuration
 New config fields:
 - `loki_enabled` (bool, default: false)
-- `loki_url` (string) - Full push endpoint URL, e.g., `http://sen-monitoring:3100/loki/api/v1/push`
+- `loki_url` (string) - Full push endpoint URL, e.g., `http://loki.example.com:3100/loki/api/v1/push`
 - `loki_auth_token` (string, optional) - Bearer token for future auth support
 - `loki_batch_size` (int, default: 1000)
 - `loki_batch_wait` (string, default: "5s")
@@ -110,7 +110,7 @@ Environment variables with `LLM_PROXY_LOKI_` prefix.
       "app": "llm-proxy",
       "provider": "anthropic",
       "environment": "production",
-      "machine": "drew@macbook",
+      "machine": "user@hostname",
       "log_type": "request"
     },
     "values": [

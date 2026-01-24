@@ -897,7 +897,7 @@ func TestLokiPushRequestFormat(t *testing.T) {
 		"provider": "anthropic",
 		"_meta": map[string]interface{}{
 			"ts":      "2024-01-24T10:30:00.000000000Z",
-			"machine": "drew@macbook",
+			"machine": "user@hostname",
 			"session": "test-session-123",
 		},
 	}
@@ -918,7 +918,7 @@ func TestLokiPushRequestFormat(t *testing.T) {
 		"app":         "llm-proxy",
 		"provider":    "anthropic",
 		"environment": "production",
-		"machine":     "drew@macbook",
+		"machine":     "user@hostname",
 		"log_type":    "request",
 	}
 

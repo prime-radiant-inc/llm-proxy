@@ -37,9 +37,9 @@ Add real-time log export to Grafana Loki from llm-proxy, enabling centralized ob
 Add Loki configuration struct and environment variable loading to config.go. This establishes the configuration foundation all other tasks depend on.
 
 **Files to Modify:**
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/config.go`
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/config_test.go`
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/config.toml.example`
+- `config.go`
+- `config_test.go`
+- `config.toml.example`
 
 **Implementation Details:**
 1. Add `LokiConfig` struct with fields: Enabled, URL, AuthToken, BatchSize, BatchWaitStr, RetryMax, UseGzip, Environment
@@ -47,7 +47,7 @@ Add Loki configuration struct and environment variable loading to config.go. Thi
 3. Add defaults in `DefaultConfig()`: Enabled=false, BatchSize=1000, BatchWaitStr="5s", RetryMax=5, UseGzip=true, Environment="development"
 4. Add environment variable loading in `LoadConfigFromEnv()` for `LLM_PROXY_LOKI_*` prefix (including `LLM_PROXY_LOKI_AUTH_TOKEN`)
 5. Update config.toml.example with Loki section
-6. URL is full endpoint (e.g., `http://sen-monitoring:3100/loki/api/v1/push`) - no path manipulation
+6. URL is full endpoint (e.g., `http://loki.example.com:3100/loki/api/v1/push`) - no path manipulation
 
 **Acceptance Criteria:**
 - [ ] LokiConfig struct defined with all fields from FR3
@@ -81,8 +81,8 @@ Add Loki configuration struct and environment variable loading to config.go. Thi
 Create the core async Loki client (FR1) that batches log entries and pushes to Loki's HTTP API with retry logic and gzip compression.
 
 **Files to Create:**
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/loki_exporter.go`
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/loki_exporter_test.go`
+- `loki_exporter.go`
+- `loki_exporter_test.go`
 
 **Implementation Details:**
 1. Define `LokiExporterConfig` struct with URL, AuthToken, BatchSize, BatchWait, RetryMax, RetryWait, Environment, BufferSize
@@ -103,7 +103,7 @@ Create the core async Loki client (FR1) that batches log entries and pushes to L
       "app": "llm-proxy",
       "provider": "anthropic",
       "environment": "production",
-      "machine": "drew@macbook",
+      "machine": "user@hostname",
       "log_type": "request"
     },
     "values": [["1706054400000000000", "{...}"]]
@@ -152,11 +152,11 @@ Create the core async Loki client (FR1) that batches log entries and pushes to L
 Create MultiWriter component (FR2) that wraps FileLogger and LokiExporter, providing the same interface as Logger but fanning out to both destinations.
 
 **Files to Create:**
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/multi_writer.go`
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/multi_writer_test.go`
+- `multi_writer.go`
+- `multi_writer_test.go`
 
 **Files to Modify:**
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/proxy.go` - add ProxyLogger interface
+- `proxy.go` - add ProxyLogger interface
 
 **Implementation Details:**
 1. Define `ProxyLogger` interface in proxy.go with methods: RegisterUpstream, LogSessionStart, LogRequest, LogResponse, LogFork
@@ -203,10 +203,10 @@ Create MultiWriter component (FR2) that wraps FileLogger and LokiExporter, provi
 Wire LokiExporter and MultiWriter into the Server, update Proxy to use ProxyLogger interface, and add /health/loki endpoint (FR4).
 
 **Files to Modify:**
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/server.go`
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/server_test.go`
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/proxy.go`
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/streaming.go` (if needed for MultiWriter)
+- `server.go`
+- `server_test.go`
+- `proxy.go`
+- `streaming.go` (if needed for MultiWriter)
 
 **Implementation Details:**
 1. Update `Server` struct to add `fileLogger *Logger`, `lokiExporter *LokiExporter`
@@ -258,8 +258,8 @@ Wire LokiExporter and MultiWriter into the Server, update Proxy to use ProxyLogg
 Add Loki status to startup logging and verify graceful shutdown properly flushes Loki (FR5).
 
 **Files to Modify:**
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/main.go`
-- `/Users/drewritter/prime-rad/sen/llm-proxy/.worktrees/825bce-main/main_test.go`
+- `main.go`
+- `main_test.go`
 
 **Implementation Details:**
 1. Add startup log line for Loki status:

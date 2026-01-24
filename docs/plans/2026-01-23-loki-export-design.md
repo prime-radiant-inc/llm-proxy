@@ -1,9 +1,7 @@
 # LLM Proxy Loki Export - Design Document
 
-**Author:** Drew Ritter
 **Status:** Draft
 **Created:** 2026-01-23
-**Related:** [Coding Container Logging & Telemetry Design](https://github.com/prime-radiant-inc/specs/blob/main/designs/we-need-a-coding-container-configuration-that-is-g-design.md)
 
 ---
 
@@ -63,7 +61,7 @@ Client → llm-proxy → Upstream API
               ├──────────────────┐
               ▼                  ▼
          JSONL files      Loki (async)
-         (unchanged)      http://sen-monitoring:3100
+         (unchanged)      http://loki.example.com:3100
 ```
 
 ### Component Diagram
@@ -184,7 +182,7 @@ func (l *LokiExporter) run() {
         "app": "llm-proxy",
         "provider": "anthropic",
         "environment": "production",
-        "machine": "drew@macbook"
+        "machine": "user@hostname"
       },
       "values": [
         ["1706054400000000000", "{\"type\":\"request\",\"seq\":1,...}"],
@@ -206,6 +204,7 @@ func (l *LokiExporter) run() {
 | `log_type` | Entry | ~4 (session_start, request, response, fork) |
 
 **NOT labels (in log body instead):**
+
 - `session_id` - Too high cardinality
 - `request_id` - Too high cardinality
 - `path` - High cardinality
@@ -233,6 +232,7 @@ func (m *MultiWriter) Close() error
 ```
 
 **Error Handling:**
+
 - File errors are returned (primary logging)
 - Loki errors are logged but don't fail the operation
 - Stats tracked for monitoring
@@ -290,8 +290,8 @@ log_dir = "~/.llm-provider-logs"
 
 [loki]
 enabled = true
-url = "http://sen-monitoring:3100/loki/api/v1/push"
-batch_size = 1000
+url = "http://loki.example.com:3100/loki/api/v1/push"
+batch_size = 100
 batch_wait = "5s"
 retry_max = 5
 use_gzip = true
@@ -359,37 +359,30 @@ go func() {
 
 ---
 
-## Loki Infrastructure
+## Loki Requirements
 
-### Existing Setup
+### Prerequisites
 
-- **Host:** EC2 instance `sen-monitoring`
-- **Access:**
-  - Tailscale: `http://sen-monitoring:3100`
-  - VPC internal: `10.x.x.x:3100` (port 3100 open to VPC CIDR)
-- **Auth:** None (`auth_enabled: false`)
-- **Retention:** 30 days
-- **Storage:** Local filesystem (`/data/loki/`)
+- Grafana Loki instance accessible via HTTP
+- Network connectivity from llm-proxy to Loki push endpoint
+- Optional: Bearer token authentication
 
-### Network Path for Containers
+### Configuration
 
+Set the Loki push endpoint URL in config:
+
+```toml
+[loki]
+enabled = true
+url = "http://your-loki-host:3100/loki/api/v1/push"
 ```
-ECS Container (VPC) → Security Group → sen-monitoring:3100
-                      (port 3100 allowed from VPC CIDR)
+
+Or via environment variable:
+
+```bash
+export LLM_PROXY_LOKI_ENABLED=true
+export LLM_PROXY_LOKI_URL="http://your-loki-host:3100/loki/api/v1/push"
 ```
-
-**Loki URL for containers:** `http://<monitoring-private-ip>:3100/loki/api/v1/push`
-
-Or via Tailscale if containers have Tailscale: `http://sen-monitoring:3100/loki/api/v1/push`
-
-### Future: S3 Backend
-
-Current Loki uses local filesystem. Design doc mentions migrating to S3 for:
-- Durability
-- Cost (S3 tiering: Standard → IA → Glacier)
-- Scalability
-
-This is out of scope for Phase 1 but the llm-proxy changes are compatible.
 
 ---
 
@@ -471,7 +464,7 @@ This is out of scope for Phase 1 but the llm-proxy changes are compatible.
 ### Phase 3: Staging Deploy
 
 1. Deploy to single container
-2. Verify connectivity to sen-monitoring
+2. Verify connectivity to loki.example.com
 3. Monitor for errors
 4. Check Loki ingestion rate
 
