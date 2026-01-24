@@ -26,7 +26,7 @@ type ProxyLogger interface {
 
 type Proxy struct {
 	client         *http.Client
-	logger         *Logger
+	logger         ProxyLogger
 	sessionManager *SessionManager
 }
 
@@ -61,6 +61,15 @@ func NewProxyWithLogger(logger *Logger) *Proxy {
 }
 
 func NewProxyWithSessionManager(logger *Logger, sm *SessionManager) *Proxy {
+	return &Proxy{
+		client:         createPassthroughClient(),
+		logger:         logger,
+		sessionManager: sm,
+	}
+}
+
+// NewProxyWithSessionManagerAndLogger creates a proxy with any ProxyLogger implementation
+func NewProxyWithSessionManagerAndLogger(logger ProxyLogger, sm *SessionManager) *Proxy {
 	return &Proxy{
 		client:         createPassthroughClient(),
 		logger:         logger,
@@ -182,7 +191,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Handle streaming vs non-streaming responses
 	if isStreamingResponse(resp) {
-		var loggerForStream *Logger
+		var loggerForStream ProxyLogger
 		var smForStream *SessionManager
 		if shouldLog {
 			loggerForStream = p.logger
