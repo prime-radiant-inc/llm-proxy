@@ -103,6 +103,17 @@ func LoadConfigFromEnv(cfg Config) Config {
 func LoadConfig(configPath string) (Config, error) {
 	cfg := DefaultConfig()
 
+	// Auto-discover config file if not specified
+	if configPath == "" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			defaultPath := home + "/.config/llm-proxy/config.toml"
+			if _, err := os.Stat(defaultPath); err == nil {
+				configPath = defaultPath
+			}
+		}
+	}
+
 	// Try to load from TOML file if it exists
 	if configPath != "" {
 		data, err := os.ReadFile(configPath)
