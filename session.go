@@ -123,3 +123,83 @@ func generateSessionID() string {
 	now := time.Now()
 	return now.Format("20060102-150405") + "-" + randomHex(4)
 }
+
+// LoadPatternState loads pattern tracking state for a session.
+// Returns a new default PatternState if session doesn't exist.
+func (sm *SessionManager) LoadPatternState(sessionID string) (*PatternState, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	state, err := sm.db.LoadPatternState(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if state == nil {
+		// Return default state for new sessions
+		return &PatternState{
+			PendingToolIDs: make(map[string]string),
+		}, nil
+	}
+	return state, nil
+}
+
+// UpdatePatternState persists pattern tracking state for a session.
+func (sm *SessionManager) UpdatePatternState(sessionID string, state *PatternState) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.db.UpdatePatternState(sessionID, state)
+}
+
+// ComputePatterns updates pattern state based on response data.
+// firstToolName is the first tool_use in the response (empty if no tools).
+// Returns isRetry for use in turn_end event.
+func ComputePatterns(state *PatternState, firstToolName string) bool {
+	var isRetry bool
+
+	if firstToolName == "" {
+		// No tools in response - reset streak but keep other state
+		state.ToolStreak = 0
+		state.RetryCount = 0
+		state.LastWasError = false
+		return false
+	}
+
+	// Check if this is a retry: same first tool AND previous tool had error
+	isRetry = (firstToolName == state.LastToolName) && state.LastWasError
+
+	// Update streak logic
+	if firstToolName == state.LastToolName {
+		state.ToolStreak++
+	} else {
+		state.ToolStreak = 1
+	}
+
+	// Update retry count
+	if isRetry {
+		state.RetryCount++
+	} else {
+		state.RetryCount = 0
+	}
+
+	// Clear last_was_error (consumed for this turn)
+	state.LastWasError = false
+
+	// Update last tool name
+	state.LastToolName = firstToolName
+
+	return isRetry
+}
+
+// StorePendingToolIDs adds tool_use_id -> tool_name mappings for later tool_result matching.
+func StorePendingToolIDs(state *PatternState, toolCalls []struct{ ID, Name string }) {
+	for _, tc := range toolCalls {
+		state.PendingToolIDs[tc.ID] = tc.Name
+	}
+}
+
+// ClearMatchedToolID removes a tool ID from pending_tool_ids and returns the tool name.
+func (sm *SessionManager) ClearMatchedToolID(sessionID, toolUseID string) (string, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.db.ClearMatchedToolID(sessionID, toolUseID)
+}

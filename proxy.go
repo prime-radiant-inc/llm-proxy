@@ -28,6 +28,8 @@ type Proxy struct {
 	client         *http.Client
 	logger         ProxyLogger
 	sessionManager *SessionManager
+	eventEmitter   AgentEventEmitter
+	machineID      string
 }
 
 // createPassthroughClient creates an HTTP client configured for true passthrough proxying
@@ -77,8 +79,158 @@ func NewProxyWithSessionManagerAndLogger(logger ProxyLogger, sm *SessionManager)
 	}
 }
 
+// NewProxyWithEventEmitter creates a proxy with event emission support.
+// The eventEmitter and machineID are used for agent observability logging.
+func NewProxyWithEventEmitter(logger ProxyLogger, sm *SessionManager, emitter AgentEventEmitter, machineID string) *Proxy {
+	return &Proxy{
+		client:         createPassthroughClient(),
+		logger:         logger,
+		sessionManager: sm,
+		eventEmitter:   emitter,
+		machineID:      machineID,
+	}
+}
+
 func (p *Proxy) generateSessionID() string {
 	return time.Now().UTC().Format("20060102-150405") + "-" + randomHex(4)
+}
+
+// ToolResultInfo holds extracted tool_result block info for event emission
+type ToolResultInfo struct {
+	ToolUseID string
+	IsError   bool
+}
+
+// extractToolResults scans request body for tool_result blocks
+func extractToolResults(body []byte) []ToolResultInfo {
+	parsed := ParseRequestBody(string(body), "")
+	var results []ToolResultInfo
+
+	for _, msg := range parsed.Messages {
+		for _, block := range msg.Content {
+			if block.Type == "tool_result" {
+				results = append(results, ToolResultInfo{
+					ToolUseID: block.ToolID,
+					IsError:   block.IsError,
+				})
+			}
+		}
+	}
+
+	return results
+}
+
+// ToolCallInfo holds extracted tool_use block info for event emission
+type ToolCallInfo struct {
+	ToolName  string
+	ToolID    string
+	ToolIndex int
+}
+
+// extractToolCalls extracts tool_use blocks from parsed response
+func extractToolCalls(content []ContentBlock) []ToolCallInfo {
+	var calls []ToolCallInfo
+	toolIndex := 0
+
+	for _, block := range content {
+		if block.Type == "tool_use" {
+			calls = append(calls, ToolCallInfo{
+				ToolName:  block.ToolName,
+				ToolID:    block.ToolID,
+				ToolIndex: toolIndex,
+			})
+			toolIndex++
+		}
+	}
+
+	return calls
+}
+
+// TurnContext holds state for agent observability event emission during a turn
+type TurnContext struct {
+	SessionID      string
+	Provider       string
+	PatternState   *PatternState
+	ErrorRecovered bool
+}
+
+// processToolResultsAndEmitEvents scans request for tool_results, emits events, updates state.
+// Returns whether any tool_result had is_error=true.
+func (p *Proxy) processToolResultsAndEmitEvents(reqBody []byte, sessionID, provider string, state *PatternState) bool {
+	if p.eventEmitter == nil {
+		return false
+	}
+
+	toolResults := extractToolResults(reqBody)
+	var hadError bool
+
+	for _, tr := range toolResults {
+		// Look up tool name from pending_tool_ids
+		toolName := "unknown"
+		if name, exists := state.PendingToolIDs[tr.ToolUseID]; exists {
+			toolName = name
+			delete(state.PendingToolIDs, tr.ToolUseID)
+		}
+
+		p.eventEmitter.EmitToolResult(sessionID, provider, p.machineID, toolName, tr.ToolUseID, tr.IsError)
+
+		if tr.IsError {
+			hadError = true
+		}
+	}
+
+	return hadError
+}
+
+// processResponseAndEmitEvents processes response, emits tool_call events, computes patterns, emits turn_end.
+func (p *Proxy) processResponseAndEmitEvents(parsed ParsedResponse, sessionID, provider string, state *PatternState, statusCode int, respBody string) {
+	if p.eventEmitter == nil || p.sessionManager == nil {
+		return
+	}
+
+	// Extract tool calls
+	toolCalls := extractToolCalls(parsed.Content)
+
+	// Emit tool_call events and store pending IDs
+	var firstToolName string
+	for _, tc := range toolCalls {
+		if firstToolName == "" {
+			firstToolName = tc.ToolName
+		}
+		p.eventEmitter.EmitToolCall(sessionID, provider, p.machineID, tc.ToolName, tc.ToolIndex, tc.ToolID)
+		state.PendingToolIDs[tc.ToolID] = tc.ToolName
+		state.SessionToolCount++
+	}
+
+	// Compute patterns (modifies state, returns isRetry)
+	isRetry := ComputePatterns(state, firstToolName)
+
+	// Classify error type from response
+	errorType := classifyErrorType(statusCode, respBody)
+
+	// Build pattern and token data
+	patterns := PatternData{
+		TurnDepth:        state.TurnCount,
+		ToolStreak:       state.ToolStreak,
+		RetryCount:       state.RetryCount,
+		SessionToolCount: state.SessionToolCount,
+	}
+
+	tokens := TokenData{
+		InputTokens:              parsed.Usage.InputTokens,
+		OutputTokens:             parsed.Usage.OutputTokens,
+		CacheReadInputTokens:     parsed.Usage.CacheReadInputTokens,
+		CacheCreationInputTokens: parsed.Usage.CacheCreationInputTokens,
+	}
+
+	// Emit turn_end
+	p.eventEmitter.EmitTurnEnd(sessionID, provider, p.machineID, parsed.StopReason, isRetry, errorType, patterns, tokens)
+
+	// Persist state
+	if err := p.sessionManager.UpdatePatternState(sessionID, state); err != nil {
+		// Log but don't fail - graceful degradation
+		// The event was already emitted
+	}
 }
 
 func randomHex(n int) string {
@@ -152,6 +304,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var seq int
 	var isNewSession bool
 	var requestID string
+	var patternState *PatternState
 	shouldLog := p.logger != nil && isConversationEndpoint(path)
 
 	if shouldLog {
@@ -166,6 +319,32 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				sessionID = p.generateSessionID()
 				seq = 1
 				isNewSession = true
+			}
+
+			// Load pattern state for event emission
+			if p.eventEmitter != nil {
+				patternState, _ = p.sessionManager.LoadPatternState(sessionID)
+				if patternState == nil {
+					patternState = &PatternState{
+						PendingToolIDs: make(map[string]string),
+					}
+				}
+
+				// Capture error_recovered BEFORE processing new tool_results
+				// error_recovered is true if last turn had error and we're continuing
+				errorRecovered := patternState.LastWasError
+
+				// Process tool_results from request body
+				// These are results from the PREVIOUS turn's tool calls
+				hadError := p.processToolResultsAndEmitEvents(reqBody, sessionID, provider, patternState)
+
+				// Set LastWasError for NEXT turn's retry detection
+				// If any tool_result had is_error, mark it for next turn
+				patternState.LastWasError = hadError
+
+				// Increment turn count and emit turn_start
+				patternState.TurnCount++
+				p.eventEmitter.EmitTurnStart(sessionID, provider, p.machineID, patternState.TurnCount, errorRecovered)
 			}
 		} else {
 			// No session manager - generate new session for each request
@@ -197,7 +376,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			loggerForStream = p.logger
 			smForStream = p.sessionManager
 		}
-		streamResponse(w, resp, loggerForStream, smForStream, sessionID, provider, seq, startTime, reqBody, requestID)
+		streamResponse(w, resp, loggerForStream, smForStream, sessionID, provider, seq, startTime, reqBody, requestID, p.eventEmitter, p.machineID, patternState)
 		return
 	}
 
@@ -222,6 +401,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			TotalMs: totalTime.Milliseconds(),
 		}
 		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, respBody, nil, timing, requestID)
+
+		// Emit agent observability events
+		if p.eventEmitter != nil && patternState != nil {
+			parsed := ParseResponseBody(string(respBody), upstream)
+			p.processResponseAndEmitEvents(parsed, sessionID, provider, patternState, resp.StatusCode, string(respBody))
+		}
 	}
 
 	// Copy response headers

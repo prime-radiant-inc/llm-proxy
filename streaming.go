@@ -129,8 +129,7 @@ func extractDeltaText(data []byte, provider string) string {
 }
 
 // streamResponse handles streaming responses from upstream
-// NOTE: sessionManager param for future fingerprinting (Task 18)
-func streamResponse(w http.ResponseWriter, resp *http.Response, logger ProxyLogger, sm *SessionManager, sessionID, provider string, seq int, startTime time.Time, reqBody []byte, requestID string) error {
+func streamResponse(w http.ResponseWriter, resp *http.Response, logger ProxyLogger, sm *SessionManager, sessionID, provider string, seq int, startTime time.Time, reqBody []byte, requestID string, emitter AgentEventEmitter, machineID string, patternState *PatternState) error {
 	sw := NewStreamingResponseWriter(w, provider)
 
 	// Copy headers
@@ -164,6 +163,53 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, logger ProxyLogg
 			TotalMs: time.Since(startTime).Milliseconds(),
 		}
 		logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, sw.chunks, timing, requestID)
+	}
+
+	// Emit agent observability events for streaming responses
+	if emitter != nil && patternState != nil && sm != nil {
+		// Parse the accumulated streaming response
+		parsed := ParseStreamingResponse(sw.chunks)
+
+		// Extract tool calls
+		toolCalls := extractToolCalls(parsed.Content)
+
+		// Emit tool_call events and store pending IDs
+		var firstToolName string
+		for _, tc := range toolCalls {
+			if firstToolName == "" {
+				firstToolName = tc.ToolName
+			}
+			emitter.EmitToolCall(sessionID, provider, machineID, tc.ToolName, tc.ToolIndex, tc.ToolID)
+			patternState.PendingToolIDs[tc.ToolID] = tc.ToolName
+			patternState.SessionToolCount++
+		}
+
+		// Compute patterns (modifies state, returns isRetry)
+		isRetry := ComputePatterns(patternState, firstToolName)
+
+		// Classify error type from response (streaming responses typically succeed, but handle errors)
+		errorType := classifyErrorType(resp.StatusCode, "")
+
+		// Build pattern and token data
+		patterns := PatternData{
+			TurnDepth:        patternState.TurnCount,
+			ToolStreak:       patternState.ToolStreak,
+			RetryCount:       patternState.RetryCount,
+			SessionToolCount: patternState.SessionToolCount,
+		}
+
+		tokens := TokenData{
+			InputTokens:              parsed.Usage.InputTokens,
+			OutputTokens:             parsed.Usage.OutputTokens,
+			CacheReadInputTokens:     parsed.Usage.CacheReadInputTokens,
+			CacheCreationInputTokens: parsed.Usage.CacheCreationInputTokens,
+		}
+
+		// Emit turn_end
+		emitter.EmitTurnEnd(sessionID, provider, machineID, parsed.StopReason, isRetry, errorType, patterns, tokens)
+
+		// Persist state
+		sm.UpdatePatternState(sessionID, patternState)
 	}
 
 	return nil

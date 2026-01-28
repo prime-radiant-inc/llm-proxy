@@ -16,6 +16,15 @@ type LokiPusher interface {
 	Close() error
 }
 
+// AgentEventEmitter is the interface for emitting agent observability events to Loki.
+// *LokiExporter implements this interface.
+type AgentEventEmitter interface {
+	EmitTurnStart(sessionID, provider, machine string, turnDepth int, errorRecovered bool)
+	EmitTurnEnd(sessionID, provider, machine, stopReason string, isRetry bool, errorType string, patterns PatternData, tokens TokenData)
+	EmitToolCall(sessionID, provider, machine, toolName string, toolIndex int, toolUseID string)
+	EmitToolResult(sessionID, provider, machine, toolName, toolUseID string, isError bool)
+}
+
 // MultiWriter fans out log entries to both a file logger (primary) and a Loki
 // exporter (secondary). File errors are returned to the caller, while Loki
 // errors are logged but don't fail the operation (graceful degradation).
@@ -185,4 +194,18 @@ func (m *MultiWriter) Close() error {
 
 	// Then close file logger
 	return m.file.Close()
+}
+
+// EventEmitter returns the AgentEventEmitter for agent observability events.
+// Returns nil if Loki is not configured.
+func (m *MultiWriter) EventEmitter() AgentEventEmitter {
+	if emitter, ok := m.loki.(AgentEventEmitter); ok {
+		return emitter
+	}
+	return nil
+}
+
+// MachineID returns the machine identifier used in log metadata.
+func (m *MultiWriter) MachineID() string {
+	return m.machineID
 }
