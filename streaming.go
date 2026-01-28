@@ -170,46 +170,8 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, logger ProxyLogg
 		// Parse the accumulated streaming response
 		parsed := ParseStreamingResponse(sw.chunks)
 
-		// Extract tool calls
-		toolCalls := extractToolCalls(parsed.Content)
-
-		// Emit tool_call events and store pending IDs
-		var firstToolName string
-		for _, tc := range toolCalls {
-			if firstToolName == "" {
-				firstToolName = tc.ToolName
-			}
-			emitter.EmitToolCall(sessionID, provider, machineID, tc.ToolName, tc.ToolIndex, tc.ToolID)
-			patternState.PendingToolIDs[tc.ToolID] = tc.ToolName
-			patternState.SessionToolCount++
-		}
-
-		// Compute patterns (modifies state, returns isRetry)
-		isRetry := ComputePatterns(patternState, firstToolName)
-
-		// Classify error type from response (streaming responses typically succeed, but handle errors)
-		errorType := classifyErrorType(resp.StatusCode, "")
-
-		// Build pattern and token data
-		patterns := PatternData{
-			TurnDepth:        patternState.TurnCount,
-			ToolStreak:       patternState.ToolStreak,
-			RetryCount:       patternState.RetryCount,
-			SessionToolCount: patternState.SessionToolCount,
-		}
-
-		tokens := TokenData{
-			InputTokens:              parsed.Usage.InputTokens,
-			OutputTokens:             parsed.Usage.OutputTokens,
-			CacheReadInputTokens:     parsed.Usage.CacheReadInputTokens,
-			CacheCreationInputTokens: parsed.Usage.CacheCreationInputTokens,
-		}
-
-		// Emit turn_end
-		emitter.EmitTurnEnd(sessionID, provider, machineID, parsed.StopReason, isRetry, errorType, patterns, tokens)
-
-		// Persist state
-		sm.UpdatePatternState(sessionID, patternState)
+		// Use shared event emission logic
+		emitResponseEvents(emitter, sm, sessionID, provider, machineID, patternState, parsed.Content, parsed.Usage, parsed.StopReason, resp.StatusCode, "")
 	}
 
 	return nil

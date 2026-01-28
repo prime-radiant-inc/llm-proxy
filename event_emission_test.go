@@ -343,6 +343,130 @@ func TestEventEmissionWithToolResults(t *testing.T) {
 	}
 }
 
+func TestErrorRecoveredFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger, _ := NewLogger(tmpDir)
+	defer logger.Close()
+
+	sm, _ := NewSessionManager(tmpDir, logger)
+	defer sm.Close()
+
+	emitter := &MockEventEmitter{}
+
+	requestCount := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+
+		if requestCount == 1 {
+			// First response: return tool_use
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"content": []map[string]interface{}{
+					{"type": "tool_use", "id": "tool_err", "name": "Bash", "input": map[string]string{"command": "ls"}},
+				},
+				"usage":       map[string]interface{}{"input_tokens": 10, "output_tokens": 5},
+				"stop_reason": "tool_use",
+			})
+		} else if requestCount == 2 {
+			// Second response: return another tool_use (after error)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"content": []map[string]interface{}{
+					{"type": "tool_use", "id": "tool_retry", "name": "Bash", "input": map[string]string{"command": "ls -la"}},
+				},
+				"usage":       map[string]interface{}{"input_tokens": 15, "output_tokens": 10},
+				"stop_reason": "tool_use",
+			})
+		} else {
+			// Third response: final response
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"content":     []map[string]interface{}{{"type": "text", "text": "Done!"}},
+				"usage":       map[string]interface{}{"input_tokens": 20, "output_tokens": 5},
+				"stop_reason": "end_turn",
+			})
+		}
+	}))
+	defer upstream.Close()
+
+	proxy := NewProxyWithEventEmitter(logger, sm, emitter, "test-machine")
+	upstreamHost := strings.TrimPrefix(upstream.URL, "http://")
+
+	// First request: get tool_use
+	body1 := `{
+		"model": "claude-sonnet-4-20250514",
+		"messages": [{"role": "user", "content": "Run a command"}],
+		"metadata": {"user_id": "user_abc_account_def_session_test-error-recovery"}
+	}`
+
+	req1 := httptest.NewRequest("POST", "/anthropic/"+upstreamHost+"/v1/messages", strings.NewReader(body1))
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	proxy.ServeHTTP(w1, req1)
+
+	// Second request: send tool_result with is_error=true
+	body2 := `{
+		"model": "claude-sonnet-4-20250514",
+		"messages": [
+			{"role": "user", "content": "Run a command"},
+			{"role": "assistant", "content": [{"type": "tool_use", "id": "tool_err", "name": "Bash"}]},
+			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool_err", "content": "Command failed", "is_error": true}]}
+		],
+		"metadata": {"user_id": "user_abc_account_def_session_test-error-recovery"}
+	}`
+
+	req2 := httptest.NewRequest("POST", "/anthropic/"+upstreamHost+"/v1/messages", strings.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	proxy.ServeHTTP(w2, req2)
+
+	// Third request: successful tool_result (error_recovered should be true)
+	body3 := `{
+		"model": "claude-sonnet-4-20250514",
+		"messages": [
+			{"role": "user", "content": "Run a command"},
+			{"role": "assistant", "content": [{"type": "tool_use", "id": "tool_err", "name": "Bash"}]},
+			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool_err", "content": "Command failed", "is_error": true}]},
+			{"role": "assistant", "content": [{"type": "tool_use", "id": "tool_retry", "name": "Bash"}]},
+			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool_retry", "content": "Success!"}]}
+		],
+		"metadata": {"user_id": "user_abc_account_def_session_test-error-recovery"}
+	}`
+
+	req3 := httptest.NewRequest("POST", "/anthropic/"+upstreamHost+"/v1/messages", strings.NewReader(body3))
+	req3.Header.Set("Content-Type", "application/json")
+	w3 := httptest.NewRecorder()
+	proxy.ServeHTTP(w3, req3)
+
+	// Verify turn_start events
+	if len(emitter.TurnStartEvents) != 3 {
+		t.Fatalf("Expected 3 turn_start events, got %d", len(emitter.TurnStartEvents))
+	}
+
+	// First turn: no error recovery (first request)
+	if emitter.TurnStartEvents[0].ErrorRecovered {
+		t.Error("Turn 1: expected error_recovered=false on first turn")
+	}
+
+	// Second turn: no error recovery (previous turn was successful)
+	if emitter.TurnStartEvents[1].ErrorRecovered {
+		t.Error("Turn 2: expected error_recovered=false (error happened IN this turn, not before)")
+	}
+
+	// Third turn: error_recovered=true because previous turn had is_error=true
+	if !emitter.TurnStartEvents[2].ErrorRecovered {
+		t.Error("Turn 3: expected error_recovered=true (previous turn had is_error)")
+	}
+
+	// Also verify is_retry on turn_end (same tool after error = retry)
+	if len(emitter.TurnEndEvents) != 3 {
+		t.Fatalf("Expected 3 turn_end events, got %d", len(emitter.TurnEndEvents))
+	}
+
+	// Turn 2's response has same tool as turn 1 and turn 1's error was detected, so is_retry=true
+	if !emitter.TurnEndEvents[1].IsRetry {
+		t.Error("Turn 2: expected is_retry=true (same tool Bash after error)")
+	}
+}
+
 func TestToolStreakTracking(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger, _ := NewLogger(tmpDir)
@@ -521,9 +645,9 @@ func TestComputePatterns(t *testing.T) {
 			if tc.firstToolName != "" && tc.state.LastToolName != tc.expectedLastTool {
 				t.Errorf("LastToolName: expected %q, got %q", tc.expectedLastTool, tc.state.LastToolName)
 			}
-			if tc.state.LastWasError {
-				t.Error("LastWasError should be cleared after ComputePatterns")
-			}
+			// Note: LastWasError is NOT cleared by ComputePatterns - it's managed by the
+			// request processing flow (processToolResultsAndEmitEvents). ComputePatterns
+			// only reads it for retry detection.
 		})
 	}
 }

@@ -153,6 +153,8 @@ func (sm *SessionManager) UpdatePatternState(sessionID string, state *PatternSta
 // ComputePatterns updates pattern state based on response data.
 // firstToolName is the first tool_use in the response (empty if no tools).
 // Returns isRetry for use in turn_end event.
+// Note: LastWasError is managed by the request processing flow (processToolResultsAndEmitEvents),
+// not here. This function only reads it for retry detection.
 func ComputePatterns(state *PatternState, firstToolName string) bool {
 	var isRetry bool
 
@@ -160,11 +162,11 @@ func ComputePatterns(state *PatternState, firstToolName string) bool {
 		// No tools in response - reset streak but keep other state
 		state.ToolStreak = 0
 		state.RetryCount = 0
-		state.LastWasError = false
 		return false
 	}
 
 	// Check if this is a retry: same first tool AND previous tool had error
+	// LastWasError was set by processToolResultsAndEmitEvents based on tool_results in this request
 	isRetry = (firstToolName == state.LastToolName) && state.LastWasError
 
 	// Update streak logic
@@ -181,20 +183,10 @@ func ComputePatterns(state *PatternState, firstToolName string) bool {
 		state.RetryCount = 0
 	}
 
-	// Clear last_was_error (consumed for this turn)
-	state.LastWasError = false
-
 	// Update last tool name
 	state.LastToolName = firstToolName
 
 	return isRetry
-}
-
-// StorePendingToolIDs adds tool_use_id -> tool_name mappings for later tool_result matching.
-func StorePendingToolIDs(state *PatternState, toolCalls []struct{ ID, Name string }) {
-	for _, tc := range toolCalls {
-		state.PendingToolIDs[tc.ID] = tc.Name
-	}
 }
 
 // ClearMatchedToolID removes a tool ID from pending_tool_ids and returns the tool name.

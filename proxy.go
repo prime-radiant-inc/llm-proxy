@@ -146,14 +146,6 @@ func extractToolCalls(content []ContentBlock) []ToolCallInfo {
 	return calls
 }
 
-// TurnContext holds state for agent observability event emission during a turn
-type TurnContext struct {
-	SessionID      string
-	Provider       string
-	PatternState   *PatternState
-	ErrorRecovered bool
-}
-
 // processToolResultsAndEmitEvents scans request for tool_results, emits events, updates state.
 // Returns whether any tool_result had is_error=true.
 func (p *Proxy) processToolResultsAndEmitEvents(reqBody []byte, sessionID, provider string, state *PatternState) bool {
@@ -188,8 +180,14 @@ func (p *Proxy) processResponseAndEmitEvents(parsed ParsedResponse, sessionID, p
 		return
 	}
 
+	emitResponseEvents(p.eventEmitter, p.sessionManager, sessionID, provider, p.machineID, state, parsed.Content, parsed.Usage, parsed.StopReason, statusCode, respBody)
+}
+
+// emitResponseEvents is the shared implementation for emitting response events.
+// Used by both non-streaming (processResponseAndEmitEvents) and streaming (streamResponse) paths.
+func emitResponseEvents(emitter AgentEventEmitter, sm *SessionManager, sessionID, provider, machineID string, state *PatternState, content []ContentBlock, usage UsageInfo, stopReason string, statusCode int, respBody string) {
 	// Extract tool calls
-	toolCalls := extractToolCalls(parsed.Content)
+	toolCalls := extractToolCalls(content)
 
 	// Emit tool_call events and store pending IDs
 	var firstToolName string
@@ -197,7 +195,7 @@ func (p *Proxy) processResponseAndEmitEvents(parsed ParsedResponse, sessionID, p
 		if firstToolName == "" {
 			firstToolName = tc.ToolName
 		}
-		p.eventEmitter.EmitToolCall(sessionID, provider, p.machineID, tc.ToolName, tc.ToolIndex, tc.ToolID)
+		emitter.EmitToolCall(sessionID, provider, machineID, tc.ToolName, tc.ToolIndex, tc.ToolID)
 		state.PendingToolIDs[tc.ToolID] = tc.ToolName
 		state.SessionToolCount++
 	}
@@ -217,17 +215,17 @@ func (p *Proxy) processResponseAndEmitEvents(parsed ParsedResponse, sessionID, p
 	}
 
 	tokens := TokenData{
-		InputTokens:              parsed.Usage.InputTokens,
-		OutputTokens:             parsed.Usage.OutputTokens,
-		CacheReadInputTokens:     parsed.Usage.CacheReadInputTokens,
-		CacheCreationInputTokens: parsed.Usage.CacheCreationInputTokens,
+		InputTokens:              usage.InputTokens,
+		OutputTokens:             usage.OutputTokens,
+		CacheReadInputTokens:     usage.CacheReadInputTokens,
+		CacheCreationInputTokens: usage.CacheCreationInputTokens,
 	}
 
 	// Emit turn_end
-	p.eventEmitter.EmitTurnEnd(sessionID, provider, p.machineID, parsed.StopReason, isRetry, errorType, patterns, tokens)
+	emitter.EmitTurnEnd(sessionID, provider, machineID, stopReason, isRetry, errorType, patterns, tokens)
 
 	// Persist state
-	if err := p.sessionManager.UpdatePatternState(sessionID, state); err != nil {
+	if err := sm.UpdatePatternState(sessionID, state); err != nil {
 		// Log but don't fail - graceful degradation
 		// The event was already emitted
 	}
