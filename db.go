@@ -3,11 +3,24 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// PatternState holds agent behavior tracking data for a session.
+// Used for computing tool streaks, retries, and turn depth metrics.
+type PatternState struct {
+	TurnCount        int               // Number of request-response cycles in this session
+	LastToolName     string            // First tool name from previous turn (for streak detection)
+	ToolStreak       int               // Consecutive turns where first tool is the same
+	RetryCount       int               // Consecutive retry attempts (same tool after error)
+	SessionToolCount int               // Total tool calls in session so far
+	LastWasError     bool              // Previous turn's tool resulted in error
+	PendingToolIDs   map[string]string // tool_use_id -> tool_name for result matching
+}
 
 type SessionDB struct {
 	db *sql.DB
@@ -45,18 +58,26 @@ func NewSessionDB(path string) (*SessionDB, error) {
 	CREATE INDEX IF NOT EXISTS idx_sessions_client_id ON sessions(client_session_id);
 	`
 
-	// Migration: add client_session_id column if it doesn't exist
-	migration := `
-	ALTER TABLE sessions ADD COLUMN client_session_id TEXT;
-	`
-
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to create schema: %w", err)
 	}
 
-	// Run migration (ignore error if column already exists)
-	db.Exec(migration)
+	// Migrations: add columns if they don't exist (ignore "duplicate column" errors)
+	migrations := []string{
+		"ALTER TABLE sessions ADD COLUMN client_session_id TEXT",
+		"ALTER TABLE sessions ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE sessions ADD COLUMN last_tool_name TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE sessions ADD COLUMN tool_streak INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE sessions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE sessions ADD COLUMN session_tool_count INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE sessions ADD COLUMN last_was_error INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE sessions ADD COLUMN pending_tool_ids TEXT NOT NULL DEFAULT '{}'",
+	}
+
+	for _, migration := range migrations {
+		db.Exec(migration) // Ignore errors - column may already exist
+	}
 
 	// Create index for client_session_id (may already exist from schema)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_sessions_client_id ON sessions(client_session_id)")
@@ -179,4 +200,92 @@ func (s *SessionDB) GetSessionWithClientID(id string) (provider, upstream, fileP
 
 	err = row.Scan(&provider, &upstream, &filePath, &lastSeq)
 	return
+}
+
+// LoadPatternState loads pattern tracking state for a session.
+// Returns nil with no error if session doesn't exist.
+func (s *SessionDB) LoadPatternState(sessionID string) (*PatternState, error) {
+	row := s.db.QueryRow(`
+		SELECT turn_count, last_tool_name, tool_streak, retry_count,
+		       session_tool_count, last_was_error, pending_tool_ids
+		FROM sessions WHERE id = ?
+	`, sessionID)
+
+	var turnCount, toolStreak, retryCount, sessionToolCount int
+	var lastToolName, pendingToolIDsJSON string
+	var lastWasError int
+
+	err := row.Scan(&turnCount, &lastToolName, &toolStreak, &retryCount,
+		&sessionToolCount, &lastWasError, &pendingToolIDsJSON)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	pendingToolIDs := make(map[string]string)
+	if pendingToolIDsJSON != "" && pendingToolIDsJSON != "{}" {
+		if err := json.Unmarshal([]byte(pendingToolIDsJSON), &pendingToolIDs); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal pending_tool_ids: %w", err)
+		}
+	}
+
+	return &PatternState{
+		TurnCount:        turnCount,
+		LastToolName:     lastToolName,
+		ToolStreak:       toolStreak,
+		RetryCount:       retryCount,
+		SessionToolCount: sessionToolCount,
+		LastWasError:     lastWasError != 0,
+		PendingToolIDs:   pendingToolIDs,
+	}, nil
+}
+
+// UpdatePatternState persists pattern tracking state for a session.
+func (s *SessionDB) UpdatePatternState(sessionID string, state *PatternState) error {
+	pendingToolIDsJSON, err := json.Marshal(state.PendingToolIDs)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pending_tool_ids: %w", err)
+	}
+
+	lastWasError := 0
+	if state.LastWasError {
+		lastWasError = 1
+	}
+
+	_, err = s.db.Exec(`
+		UPDATE sessions
+		SET turn_count = ?, last_tool_name = ?, tool_streak = ?, retry_count = ?,
+		    session_tool_count = ?, last_was_error = ?, pending_tool_ids = ?
+		WHERE id = ?
+	`, state.TurnCount, state.LastToolName, state.ToolStreak, state.RetryCount,
+		state.SessionToolCount, lastWasError, string(pendingToolIDsJSON), sessionID)
+
+	return err
+}
+
+// ClearMatchedToolID removes a tool ID from pending_tool_ids and returns the tool name.
+// Returns empty string if the tool ID was not found.
+func (s *SessionDB) ClearMatchedToolID(sessionID, toolUseID string) (string, error) {
+	state, err := s.LoadPatternState(sessionID)
+	if err != nil {
+		return "", err
+	}
+	if state == nil {
+		return "", nil
+	}
+
+	toolName, exists := state.PendingToolIDs[toolUseID]
+	if !exists {
+		return "", nil
+	}
+
+	delete(state.PendingToolIDs, toolUseID)
+
+	if err := s.UpdatePatternState(sessionID, state); err != nil {
+		return "", err
+	}
+
+	return toolName, nil
 }
