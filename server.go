@@ -72,10 +72,14 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 
+	// Get event emitter from multiWriter (returns nil if Loki not configured)
+	eventEmitter := multiWriter.EventEmitter()
+	machineID := multiWriter.MachineID()
+
 	s := &Server{
 		config:         cfg,
 		mux:            http.NewServeMux(),
-		proxy:          NewProxyWithSessionManagerAndLogger(multiWriter, sessionManager),
+		proxy:          NewProxyWithEventEmitter(multiWriter, sessionManager, eventEmitter, machineID),
 		fileLogger:     fileLogger,
 		lokiExporter:   lokiExporter,
 		multiWriter:    multiWriter,

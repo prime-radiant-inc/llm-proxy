@@ -198,6 +198,63 @@ func TestHealthLoki_Disabled(t *testing.T) {
 	}
 }
 
+// TestNewServer_EventEmitterWiredUp verifies that when Loki is enabled, the proxy has an event emitter
+func TestNewServer_EventEmitterWiredUp(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		Port:   8080,
+		LogDir: tmpDir,
+		Loki: LokiConfig{
+			Enabled:      true,
+			URL:          "http://loki:3100/loki/api/v1/push",
+			BatchSize:    100,
+			BatchWaitStr: "1s",
+			RetryMax:     3,
+			UseGzip:      true,
+			Environment:  "test",
+		},
+	}
+
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer srv.Close()
+
+	// The proxy should have an event emitter when Loki is enabled
+	if srv.proxy.eventEmitter == nil {
+		t.Error("expected proxy to have eventEmitter when Loki is enabled")
+	}
+
+	// The proxy should have a machineID set
+	if srv.proxy.machineID == "" {
+		t.Error("expected proxy to have machineID set when event emitter is configured")
+	}
+}
+
+// TestNewServer_EventEmitterNilWhenLokiDisabled verifies no event emitter when Loki is disabled
+func TestNewServer_EventEmitterNilWhenLokiDisabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		Port:   8080,
+		LogDir: tmpDir,
+		Loki: LokiConfig{
+			Enabled: false,
+		},
+	}
+
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer srv.Close()
+
+	// The proxy should NOT have an event emitter when Loki is disabled
+	if srv.proxy.eventEmitter != nil {
+		t.Error("expected proxy to NOT have eventEmitter when Loki is disabled")
+	}
+}
+
 // TestHealthLoki_Enabled verifies /health/loki returns stats when Loki is configured
 func TestHealthLoki_Enabled(t *testing.T) {
 	tmpDir := t.TempDir()
