@@ -220,18 +220,17 @@ func main() {
 		}
 	}
 
-	// Setup graceful shutdown
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	srv, err := NewServer(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating server: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Create listener (allows us to get actual port for dynamic binding)
-	addr := fmt.Sprintf(":%d", cfg.Port)
+	// Bind to localhost only — the proxy has no authentication, so binding to
+	// all interfaces would allow unauthenticated access if security groups are
+	// misconfigured. In ECS awsvpc mode, localhost is shared between containers
+	// in the same task, so the PA container can still reach the proxy.
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error binding to %s: %v\n", addr, err)
@@ -251,15 +250,29 @@ func main() {
 		log.Printf("Wrote port %d to %s", actualPort, portfilePath)
 	}
 
-	// Run shutdown handler in background
+	httpSrv := &http.Server{
+		Handler:           srv,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// Setup graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	go func() {
 		<-ctx.Done()
 		log.Println("Shutting down gracefully...")
+		// Allow in-flight streaming requests to complete (Bedrock extended
+		// thinking can take 3-5 min TTFB)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("HTTP shutdown error: %v", err)
+		}
 		srv.Close()
-		listener.Close()
 	}()
 
-	log.Printf("Starting llm-proxy on :%d", actualPort)
+	log.Printf("Starting llm-proxy on %s", addr)
 	log.Printf("Log directory: %s", cfg.LogDir)
 	if cfg.Loki.Enabled {
 		log.Printf("Loki export: enabled (%s)", cfg.Loki.URL)
@@ -267,7 +280,7 @@ func main() {
 		log.Printf("Loki export: disabled")
 	}
 
-	if err := http.Serve(listener, srv); err != nil && err != http.ErrServerClosed {
+	if err := httpSrv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
 }
