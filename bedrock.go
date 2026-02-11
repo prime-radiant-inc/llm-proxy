@@ -238,6 +238,12 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 	if shouldLog {
 		requestID = uuid.New().String()
 
+		// Set Bedrock context for Loki transport/model labels on response entries
+		if mw, ok := p.logger.(*MultiWriter); ok {
+			mw.SetBedrockContext(requestID, modelID)
+			defer mw.ClearBedrockContext(requestID)
+		}
+
 		if p.sessionManager != nil {
 			sessionID, seq, isNewSession, err = p.sessionManager.GetOrCreateSession(reqBody, provider, upstream, r.Header, r.URL.Path)
 			if err != nil {

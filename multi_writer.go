@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/user"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,6 +29,12 @@ type AgentEventEmitter interface {
 	EmitToolResult(sessionID, provider, machine, toolName, toolUseID string, isError bool)
 }
 
+// bedrockContext holds per-request Bedrock metadata for Loki labels.
+type bedrockContext struct {
+	transport string
+	modelID   string
+}
+
 // MultiWriter fans out log entries to both a file logger (primary) and a Loki
 // exporter (secondary). File errors are returned to the caller, while Loki
 // errors are logged but don't fail the operation (graceful degradation).
@@ -34,6 +42,10 @@ type MultiWriter struct {
 	file      ProxyLogger
 	loki      LokiPusher
 	machineID string
+
+	// bedrockContexts stores per-request Bedrock metadata keyed by requestID.
+	// Set by serveBedrock before logging; consumed by LogRequest/LogResponse.
+	bedrockContexts sync.Map
 }
 
 // NewMultiWriter creates a new MultiWriter that writes to both the file logger
@@ -53,6 +65,45 @@ func NewMultiWriterWithCloseOrder(file ProxyLogger, loki LokiPusher, closeOrder 
 		file:      file,
 		loki:      loki,
 		machineID: getMachineIDForMultiWriter(),
+	}
+}
+
+// SetBedrockContext stores Bedrock metadata for a request, so LogRequest
+// and LogResponse can add transport and model_override to _meta.
+func (m *MultiWriter) SetBedrockContext(requestID, modelID string) {
+	m.bedrockContexts.Store(requestID, bedrockContext{
+		transport: "bedrock",
+		modelID:   modelID,
+	})
+}
+
+// ClearBedrockContext removes Bedrock metadata for a completed request.
+func (m *MultiWriter) ClearBedrockContext(requestID string) {
+	m.bedrockContexts.Delete(requestID)
+}
+
+// addBedrockMeta adds transport and model_override to the _meta map if
+// Bedrock context exists for this request, or detects Bedrock from path.
+func (m *MultiWriter) addBedrockMetaByRequestID(meta map[string]interface{}, requestID string) {
+	if ctx, ok := m.bedrockContexts.Load(requestID); ok {
+		bc := ctx.(bedrockContext)
+		meta["transport"] = bc.transport
+		if bc.modelID != "" {
+			meta["model_override"] = bc.modelID
+		}
+	}
+}
+
+// addBedrockMeta adds transport and model_override to _meta based on path.
+// Used by LogRequest which has the request path available.
+func addBedrockMeta(meta map[string]interface{}, path string) {
+	if !strings.HasPrefix(path, "/model/") {
+		return
+	}
+	meta["transport"] = "bedrock"
+	modelID, err := extractModelID(path)
+	if err == nil && modelID != "" {
+		meta["model_override"] = modelID
 	}
 }
 
@@ -110,6 +161,14 @@ func (m *MultiWriter) LogRequest(sessionID, provider string, seq int, method, pa
 		bodyHash := sha256.Sum256(body)
 		bodySHA := hex.EncodeToString(bodyHash[:])
 
+		meta := map[string]interface{}{
+			"ts":         time.Now().UTC().Format(time.RFC3339Nano),
+			"machine":    m.machineID,
+			"session":    sessionID,
+			"request_id": requestID,
+		}
+		addBedrockMeta(meta, path)
+
 		entry := map[string]interface{}{
 			"type":        "request",
 			"seq":         seq,
@@ -119,12 +178,7 @@ func (m *MultiWriter) LogRequest(sessionID, provider string, seq int, method, pa
 			"body":        string(body),
 			"size":        len(body),
 			"request_sha": bodySHA,
-			"_meta": map[string]interface{}{
-				"ts":         time.Now().UTC().Format(time.RFC3339Nano),
-				"machine":    m.machineID,
-				"session":    sessionID,
-				"request_id": requestID,
-			},
+			"_meta":       meta,
 		}
 		m.loki.Push(entry, provider)
 	}
@@ -138,6 +192,15 @@ func (m *MultiWriter) LogResponse(sessionID, provider string, seq int, status in
 	err := m.file.LogResponse(sessionID, provider, seq, status, headers, body, chunks, timing, requestID)
 
 	if m.loki != nil {
+		meta := map[string]interface{}{
+			"ts":         time.Now().UTC().Format(time.RFC3339Nano),
+			"machine":    m.machineID,
+			"session":    sessionID,
+			"request_id": requestID,
+		}
+		// Add Bedrock metadata if this request was a Bedrock pass-through
+		m.addBedrockMetaByRequestID(meta, requestID)
+
 		entry := map[string]interface{}{
 			"type":    "response",
 			"seq":     seq,
@@ -145,12 +208,7 @@ func (m *MultiWriter) LogResponse(sessionID, provider string, seq int, status in
 			"headers": headers,
 			"timing":  timing,
 			"size":    len(body),
-			"_meta": map[string]interface{}{
-				"ts":         time.Now().UTC().Format(time.RFC3339Nano),
-				"machine":    m.machineID,
-				"session":    sessionID,
-				"request_id": requestID,
-			},
+			"_meta":   meta,
 		}
 
 		if chunks != nil {
