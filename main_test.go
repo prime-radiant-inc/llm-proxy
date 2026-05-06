@@ -2,6 +2,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -57,6 +59,63 @@ func TestParseCLIFlagsSetup(t *testing.T) {
 
 	if !flags.Setup {
 		t.Error("expected Setup flag to be true")
+	}
+}
+
+func TestApplyRuntimeDefaults(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	wantLogDir := filepath.Join(home, ".llm-provider-logs")
+
+	tests := []struct {
+		name       string
+		cfg        Config
+		flags      CLIFlags
+		wantLogDir string
+		wantPort   int
+	}{
+		{
+			name:       "non-service mode, no flags: home log dir, default port",
+			cfg:        Config{LogDir: "./logs", Port: 0},
+			flags:      CLIFlags{},
+			wantLogDir: wantLogDir,
+			wantPort:   12071,
+		},
+		{
+			name:       "service mode, no flags: home log dir, dynamic port",
+			cfg:        Config{LogDir: "./logs", Port: 0, ServiceMode: true},
+			flags:      CLIFlags{},
+			wantLogDir: wantLogDir,
+			wantPort:   0,
+		},
+		{
+			name:       "explicit --log-dir is preserved",
+			cfg:        Config{LogDir: "/tmp/logs", Port: 0},
+			flags:      CLIFlags{LogDir: "/tmp/logs"},
+			wantLogDir: "/tmp/logs",
+			wantPort:   12071,
+		},
+		{
+			name:       "explicit --port is preserved",
+			cfg:        Config{LogDir: "./logs", Port: 9000},
+			flags:      CLIFlags{},
+			wantLogDir: wantLogDir,
+			wantPort:   9000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := applyRuntimeDefaults(tt.cfg, tt.flags)
+			if got.LogDir != tt.wantLogDir {
+				t.Errorf("LogDir: got %q, want %q", got.LogDir, tt.wantLogDir)
+			}
+			if got.Port != tt.wantPort {
+				t.Errorf("Port: got %d, want %d", got.Port, tt.wantPort)
+			}
+		})
 	}
 }
 

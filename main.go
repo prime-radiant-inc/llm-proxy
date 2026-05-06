@@ -54,6 +54,25 @@ func ParseCLIFlags(args []string) (CLIFlags, error) {
 	return flags, nil
 }
 
+// applyRuntimeDefaults applies post-merge defaulting that depends on whether
+// flags were explicitly passed. Run after MergeConfig and before NewServer.
+func applyRuntimeDefaults(cfg Config, flags CLIFlags) Config {
+	// Default log dir to ~/.llm-provider-logs/ unless --log-dir was passed.
+	// Both service and non-service modes share this default.
+	if flags.LogDir == "" {
+		home, _ := os.UserHomeDir()
+		cfg.LogDir = filepath.Join(home, ".llm-provider-logs")
+	}
+
+	// Non-service mode: default to port 12071 when no port is configured.
+	// Service mode keeps port 0 to trigger dynamic assignment.
+	if !cfg.ServiceMode && cfg.Port == 0 {
+		cfg.Port = 12071
+	}
+
+	return cfg
+}
+
 func MergeConfig(cfg Config, flags CLIFlags) Config {
 	if flags.Port != 0 {
 		cfg.Port = flags.Port
@@ -207,19 +226,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Service mode overrides: default log dir
-	if cfg.ServiceMode {
-		// Port 0 is the default, so dynamic assignment happens automatically
-		// unless overridden via --port, config file, or env var.
-		// Use ~/.llm-provider-logs/ unless explicitly set via --log-dir
-		if flags.LogDir == "" {
-			home, _ := os.UserHomeDir()
-			cfg.LogDir = filepath.Join(home, ".llm-provider-logs")
-		}
-	} else if cfg.Port == 0 {
-		// Non-service mode: default to 12071 if no port was explicitly configured
-		cfg.Port = 12071
-	}
+	cfg = applyRuntimeDefaults(cfg, flags)
 
 	srv, err := NewServer(cfg)
 	if err != nil {
