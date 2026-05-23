@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"encoding/hex"
 	"io"
@@ -13,6 +14,31 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// decodeBodyForLogging returns the response body decoded for log storage.
+// If Content-Encoding is gzip, it decompresses; otherwise returns body unchanged.
+// On any decode error, returns the original body so logging never fails outright.
+// We log decoded bytes so the JSONL response is readable JSON (and `usage` is recoverable);
+// the upstream response forwarded to the client stays compressed.
+func decodeBodyForLogging(body []byte, headers http.Header) []byte {
+	enc := strings.ToLower(strings.TrimSpace(headers.Get("Content-Encoding")))
+	if enc == "" || enc == "identity" {
+		return body
+	}
+	if enc != "gzip" {
+		return body
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return body
+	}
+	defer gr.Close()
+	decoded, err := io.ReadAll(gr)
+	if err != nil {
+		return body
+	}
+	return decoded
+}
 
 // ProxyLogger is the interface for logging proxy requests and responses.
 // Both *Logger (file-based) and *MultiWriter (fan-out) implement this interface.
@@ -407,12 +433,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			TTFBMs:  ttfb.Milliseconds(),
 			TotalMs: totalTime.Milliseconds(),
 		}
-		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, respBody, nil, timing, requestID)
+		// Decode gzip/etc before logging so JSONL body is readable JSON (PRI-1800).
+		// The forwarded response below uses the original, untouched bytes.
+		logBody := decodeBodyForLogging(respBody, resp.Header)
+		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, logBody, nil, timing, requestID)
 
 		// Emit agent observability events
 		if p.eventEmitter != nil && patternState != nil {
-			parsed := ParseResponseBody(string(respBody), upstream)
-			p.processResponseAndEmitEvents(parsed, sessionID, provider, patternState, resp.StatusCode, string(respBody))
+			parsed := ParseResponseBody(string(logBody), upstream)
+			p.processResponseAndEmitEvents(parsed, sessionID, provider, patternState, resp.StatusCode, string(logBody))
 		}
 	}
 
