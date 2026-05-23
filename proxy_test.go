@@ -2,6 +2,9 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -122,6 +125,117 @@ func TestProxyLogsRequests(t *testing.T) {
 	if !strings.Contains(string(data), `"type":"response"`) {
 		t.Error("Log should contain response entry")
 	}
+}
+
+// TestProxyDecompressesGzipResponseForLogging verifies that when an upstream
+// returns a gzip-encoded response, the proxy decompresses it before writing
+// to the JSONL log so the response body is readable JSON we can jq.
+// Regression test for PRI-1800.
+func TestProxyDecompressesGzipResponseForLogging(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	responseJSON := `{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"model":"claude-sonnet-4","stop_reason":"end_turn","usage":{"input_tokens":42,"output_tokens":7,"cache_creation_input_tokens":100,"cache_read_input_tokens":50}}`
+
+	// Build a gzip-encoded body
+	var gzBuf bytes.Buffer
+	gw := gzip.NewWriter(&gzBuf)
+	if _, err := gw.Write([]byte(responseJSON)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	gzipped := gzBuf.Bytes()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		w.Write(gzipped)
+	}))
+	defer upstream.Close()
+
+	upstreamHost := strings.TrimPrefix(upstream.URL, "http://")
+
+	logger, _ := NewLogger(tmpDir)
+	defer logger.Close()
+
+	proxy := NewProxyWithLogger(logger)
+
+	reqPath := "/anthropic/" + upstreamHost + "/v1/messages"
+	req := httptest.NewRequest("POST", reqPath, strings.NewReader(`{"messages":[],"model":"claude-sonnet-4"}`))
+	req.Header.Set("X-Api-Key", "sk-ant-test123456")
+	req.Header.Set("Accept-Encoding", "gzip")
+
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	// Give async logging a moment
+	time.Sleep(50 * time.Millisecond)
+
+	today := time.Now().Format("2006-01-02")
+	files, _ := filepath.Glob(filepath.Join(tmpDir, upstreamHost, today, "*.jsonl"))
+	if len(files) == 0 {
+		t.Fatal("expected log file to be created")
+	}
+
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+
+	// Find the response line and assert its body is parseable JSON
+	// with the expected usage field.
+	var foundResponse bool
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var entry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("log line is not valid JSON: %v\nline: %s", err, line)
+		}
+		if entry["type"] != "response" {
+			continue
+		}
+		foundResponse = true
+
+		bodyStr, ok := entry["body"].(string)
+		if !ok {
+			t.Fatalf("response entry missing string body field: %v", entry)
+		}
+
+		// The body field must be parseable JSON (not corrupted gzip bytes)
+		var bodyObj map[string]interface{}
+		if err := json.Unmarshal([]byte(bodyStr), &bodyObj); err != nil {
+			t.Fatalf("logged response body is not valid JSON: %v\nbody (hex prefix): %x", err, []byte(bodyStr)[:min(32, len(bodyStr))])
+		}
+
+		usage, ok := bodyObj["usage"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("logged response body missing usage field: %v", bodyObj)
+		}
+		if got := usage["cache_creation_input_tokens"]; got != float64(100) {
+			t.Errorf("cache_creation_input_tokens = %v, want 100", got)
+		}
+		if got := usage["cache_read_input_tokens"]; got != float64(50) {
+			t.Errorf("cache_read_input_tokens = %v, want 50", got)
+		}
+		if got := usage["input_tokens"]; got != float64(42) {
+			t.Errorf("input_tokens = %v, want 42", got)
+		}
+	}
+	if !foundResponse {
+		t.Fatal("did not find response entry in log")
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func TestIsJWTAuth(t *testing.T) {
