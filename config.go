@@ -31,7 +31,7 @@ type LokiConfig struct {
 // APITokenSubstitutionConfig configures the opt-in API token substitution feature.
 type APITokenSubstitutionConfig struct {
 	Enabled     bool   `toml:"enabled"`
-	Command     string `toml:"command"`    // local command; stdin gets the JSON context, stdout is the real key
+	Command     string `toml:"command"`    // single executable path (NOT a shell line); stdin receives the JSON context, stdout is the real key; use a wrapper script if arguments are needed
 	CacheTTLStr string `toml:"cache_ttl"`  // duration string, e.g. "5m"
 	CacheSize   int    `toml:"cache_size"` // max cached entries (oldest evicted past this)
 	TimeoutStr  string `toml:"timeout"`    // per-resolve duration string, e.g. "2s"

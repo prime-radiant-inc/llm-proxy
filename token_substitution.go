@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -20,8 +21,8 @@ type ResolveContext struct {
 }
 
 type cacheEntry struct {
-	key     string
-	expires time.Time
+	resolvedKey string
+	expires     time.Time
 }
 
 type APITokenSubstituter struct {
@@ -34,9 +35,30 @@ type APITokenSubstituter struct {
 	cache map[string]cacheEntry
 }
 
+// limitedWriter buffers up to n bytes and silently discards the rest.
+type limitedWriter struct {
+	buf bytes.Buffer
+	n   int
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	if w.n > 0 {
+		take := len(p)
+		if take > w.n {
+			take = w.n
+		}
+		w.buf.Write(p[:take])
+		w.n -= take
+	}
+	return len(p), nil
+}
+
 // providerURLRe permits only hostname[:port] characters — no path separators or shell metacharacters.
 var providerURLRe = regexp.MustCompile(`^[A-Za-z0-9.\-:]+$`)
 
+// NewAPITokenSubstituter constructs a substituter from cfg.
+// cfg.Command must be a single executable path, NOT a shell command line;
+// use a wrapper script if you need to pass arguments to the resolver.
 func NewAPITokenSubstituter(cfg APITokenSubstitutionConfig) (*APITokenSubstituter, error) {
 	if cfg.Command == "" {
 		return nil, errors.New("api_token_substitution.command is required when enabled")
@@ -73,7 +95,7 @@ func (s *APITokenSubstituter) cacheGet(k string) (string, bool) {
 		}
 		return "", false
 	}
-	return e.key, true
+	return e.resolvedKey, true
 }
 
 func (s *APITokenSubstituter) cachePut(k, v string) {
@@ -85,13 +107,16 @@ func (s *APITokenSubstituter) cachePut(k, v string) {
 			break
 		}
 	}
-	s.cache[k] = cacheEntry{key: v, expires: time.Now().Add(s.ttl)}
+	s.cache[k] = cacheEntry{resolvedKey: v, expires: time.Now().Add(s.ttl)}
 }
 
 // Resolve returns (realKey, httpStatus, err).
 // httpStatus == 0 means success.
 // httpStatus == 401: invalid provider_url, or resolver exited non-zero.
 // httpStatus == 502: transient failure (timeout, spawn failure, command-not-found, or exit 0 with empty stdout).
+//
+// Concurrent calls for the same uncached key each invoke the resolver independently
+// (no singleflight deduplication) — acceptable for a local resolver in v1.
 func (s *APITokenSubstituter) Resolve(ctx context.Context, rc ResolveContext) (string, int, error) {
 	if !providerURLRe.MatchString(rc.ProviderURL) {
 		return "", 401, errors.New("invalid provider_url")
@@ -110,8 +135,10 @@ func (s *APITokenSubstituter) Resolve(ctx context.Context, rc ResolveContext) (s
 
 	cmd := exec.CommandContext(cctx, s.command)
 	cmd.Stdin = bytes.NewReader(payload)
-	var out bytes.Buffer
-	cmd.Stdout = &out
+	outW := &limitedWriter{n: 64 * 1024}
+	errW := &limitedWriter{n: 4 * 1024}
+	cmd.Stdout = outW
+	cmd.Stderr = errW
 	runErr := cmd.Run()
 
 	if cctx.Err() == context.DeadlineExceeded {
@@ -120,11 +147,11 @@ func (s *APITokenSubstituter) Resolve(ctx context.Context, rc ResolveContext) (s
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
-			return "", 401, runErr
+			return "", 401, fmt.Errorf("resolver failed: %w: %s", runErr, strings.TrimSpace(errW.buf.String()))
 		}
-		return "", 502, runErr
+		return "", 502, fmt.Errorf("resolver failed: %w: %s", runErr, strings.TrimSpace(errW.buf.String()))
 	}
-	key := strings.TrimSpace(out.String())
+	key := strings.TrimSpace(outW.buf.String())
 	if key == "" {
 		return "", 502, errors.New("resolver returned empty key")
 	}
