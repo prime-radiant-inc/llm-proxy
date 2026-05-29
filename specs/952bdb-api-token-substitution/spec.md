@@ -21,6 +21,9 @@ The feature is **off by default** and changes nothing for existing transparent-p
 deployments. Its first consumer is Cloud Build (PRI-1888), which must keep the provider
 key out of the build box.
 
+This spec also includes one small **related proxy change** the shared-host deployment needs:
+a configurable listen address (see "Related change" below).
+
 ## Goals
 
 - Keep the real provider key out of the client; the client holds only an opaque token.
@@ -39,8 +42,8 @@ key out of the build box.
 - Minting the tokens/nonces — that is the consumer's job (e.g. the Cloud Build bastion).
 - Rate-limiting or quota enforcement (a future resolver / key server may add it).
 - Provider-specific request transformation beyond setting the provider's auth header.
-- Passing `model` / `client_id` / session id to the resolver in v1 (see Technical
-  Decisions — they are not available at the substitution point without new parsing).
+- Passing `model` / `client_id` / session id to the resolver in v1 (not available at the
+  substitution point without new parsing).
 
 ## Architecture
 
@@ -48,15 +51,29 @@ key out of the build box.
 holds the resolver (which runs the command) and the cache. It is injected into `Proxy`
 via the constructor and wired in `server.go`.
 
-**Integration point — early, and on every proxied request.** In `proxy.go` `ServeHTTP`,
-substitution runs immediately after `ParseProxyURL` and the request-body buffer
-(`proxy.go:283`–`320`), **before** the session/logging block (which is gated behind
-`shouldLog`/`isConversationEndpoint`, `proxy.go:341`) and before `client.Do`
-(`proxy.go:397`). It must run for **every** proxied request — `/v1/messages`,
-`/v1/messages/count_tokens`, `/v1/models`, etc. — because all of them carry the client's
-token and a non-conversation endpoint that skipped substitution would forward the opaque
-token upstream and 401. Because it runs before the logging block, a fail-closed rejection
-never writes a session-start, request log, or turn-start event.
+**Where the token is read.** The presented token is taken from the provider's auth header —
+`x-api-key` for Anthropic key-style auth, `Authorization: Bearer <token>` where the client
+uses it — reusing the existing key-header logic (`obfuscate.go` `isAPIKeyHeader`). That same
+header is what gets replaced in FR4.
+
+**Integration point — resolve early, on every request; replace the header after copy.** In
+`proxy.go` `ServeHTTP`:
+- Read the token and (after `ParseProxyURL`, `proxy.go:283`, and after any provider-specific
+  upstream remap — see below) build the context; validate; resolve. This is independent of
+  the session/logging block (gated by `shouldLog`/`isConversationEndpoint`, `proxy.go:341`),
+  so it runs for **every** proxied endpoint — `/v1/messages`, `count_tokens`, `models`, etc.
+  (a non-conversation endpoint that skipped substitution would forward the opaque token and
+  401).
+- **Apply the substitution by `Set`ting the auth header on the outbound `proxyReq` *after*
+  `copyHeaders` (`proxy.go:330`)** — `copyHeaders` copies the client's headers onto `proxyReq`,
+  so the replacement must follow it or it is clobbered — and before the `shouldLog` block
+  (341) and `client.Do` (397). Because resolution and the fail-closed gate precede the
+  logging block, a rejected request writes no session-start, request, or turn-start log.
+
+**`provider_url` value.** `provider_url` is the `upstream` host **as used for the outbound
+request**, i.e. captured after any provider-specific remap (for OpenAI JWT auth the proxy
+rewrites `upstream` `api.openai.com → chatgpt.com` at `proxy.go:292-297`). For the v1
+Anthropic consumer there is no remap, so `provider_url` is `api.anthropic.com`.
 
 **Resolution context (v1)** — only fields available at that point, JSON on stdin:
 
@@ -70,25 +87,21 @@ never writes a session-start, request log, or turn-start event.
 ```
 
 `model`, `client_id`, and the llm-proxy session id are **omitted in v1**: they are not
-available this early (model is parsed only on the async logging path; the client session
-id is computed inside `GetOrCreateSession` and not returned). They become optional context
+available this early (model is parsed only on the async logging path; the client session id
+is computed inside `GetOrCreateSession` and not returned). They become optional context
 fields if and when a resolver needs them and the parsing is made available — no pipeline
-reordering to chase them now. The token rides on **stdin**, never argv (argv is
-world-readable via `ps`).
+reordering now. The token rides on **stdin**, never argv.
 
-**Input validation (before resolving).** The proxy rejects the request fail-closed (401)
-if `provider` is not in the known-provider allowlist (`validProviders`, `urlparse.go`) or
-`provider_url` is not a syntactically valid host (strict charset, no path separators or
-shell metacharacters). This protects resolvers that build filesystem paths or shell out
-from box-controlled `provider`/`provider_url` values.
+**Input validation (before resolving).** `provider` is already validated by `ParseProxyURL`
+(unknown providers are rejected `400` at `proxy.go:285`). The feature additionally validates
+`provider_url` against a strict host charset (no path separators or shell metacharacters)
+and rejects fail-closed if it fails — protecting resolvers that build filesystem paths or
+shell out from box-controlled values.
 
 **Resolver contract:** the command receives the context JSON on stdin and runs under
-`timeout`. Trimmed stdout = the real key on exit 0; non-zero exit, empty output, timeout,
-or command-not-found = resolution failure → fail-closed (401).
-
-**Substitution:** on success the proxy **replaces** (HTTP `Set`, not `Add`) the
-provider-appropriate auth header on the outbound request with the resolved key, removing
-any client-supplied auth header so the opaque token never rides alongside the real key.
+`timeout`. **Trimmed stdout is the real key itself (not a path or filename)** on exit 0;
+non-zero exit, empty output, timeout, or command-not-found = resolution failure →
+fail-closed.
 
 **Cache:** an in-memory map keyed by `(provider, provider_url, api_token)` — the fields the
 v1 resolver consumes plus the bearer token — value = the resolved key, expiring after
@@ -96,55 +109,61 @@ v1 resolver consumes plus the bearer token — value = the resolved key, expirin
 future resolver's output depends on more dimensions, the keyed set becomes configurable
 (deferred).
 
+## Related change: configurable listen address
+
+The proxy currently binds `localhost` only (`main.go:241`, deliberately, because it has no
+auth). The shared-host Cloud Build deployment needs it to bind the host's bridge gateway IP.
+Add a proxy-wide `listen_host` config (env `LLM_PROXY_LISTEN_HOST`), **default `localhost`**
+(unchanged behavior). This is general proxy config, not substitution-specific. Binding a
+non-loopback address re-introduces the unauthenticated-access concern the localhost default
+guards against, so it is intended to be used only behind a host firewall / isolated bridge
+(the Cloud Build spec specifies the INPUT rule); document that in the config comment.
+
 ## Functional Requirements
 
 - **FR1 — Config, off by default.** An `[api_token_substitution]` section with `enabled`,
-  `command`, `cache_ttl`, `cache_size`, `timeout`. Env overrides
-  `LLM_PROXY_API_TOKEN_SUBSTITUTION_*`. Precedence env > TOML > defaults (no per-field CLI
-  flags — consistent with the existing Loki section).
+  `command`, `cache_ttl`, `cache_size`, `timeout`; plus the top-level `listen_host`. Env
+  overrides `LLM_PROXY_API_TOKEN_SUBSTITUTION_*` and `LLM_PROXY_LISTEN_HOST`. Precedence
+  env > TOML > defaults (no per-field CLI flags — consistent with the Loki section).
 - **FR2 — Disabled is transparent.** When `enabled = false`, the request path is
   byte-for-byte identical to today's passthrough.
 - **FR3 — Resolve early, every request.** When enabled, for every proxied request the proxy
-  validates `provider`/`provider_url`, builds the v1 context, checks the cache, and on a
-  miss runs `command` with the context JSON on stdin under `timeout` — all before the
+  reads the token, validates `provider_url`, builds the v1 context, checks the cache, and on
+  a miss runs `command` with the context JSON on stdin under `timeout` — independent of the
   session/logging block and before `client.Do`.
-- **FR4 — Substitute.** On success the proxy `Set`s the provider-appropriate auth header
-  (`x-api-key` for Anthropic key-style auth, `Authorization: Bearer` where the client used
-  it) on the outbound request to the resolved key, replacing/removing the client's auth
-  header.
+- **FR4 — Substitute.** On success the proxy `Set`s the provider auth header (the one the
+  token came from) on `proxyReq` to the resolved key, **after `copyHeaders` (proxy.go:330)**,
+  removing the client's value so the opaque token never rides alongside the real key.
 - **FR5 — Fail closed, before logging.** On invalid input, non-zero exit, empty stdout,
   timeout, or command-not-found, the proxy returns `401`, does **not** contact the upstream,
-  and does **not** emit any session/request/turn log for that request. Error responses and
-  log lines never contain the token or any key.
+  and writes **no** session/request/turn log for that request. Error responses and log lines
+  never contain the token or any key.
 - **FR6 — Never expose the real key.** The resolved key appears in no log, JSONL entry, the
-  explorer, or any error message. (The request logger records inbound — obfuscated —
-  headers, not the mutated outbound header.) A test asserts the resolved key is absent from
-  request- and response-header logs and from all error strings.
+  explorer, or any error message. (The request logger records inbound — obfuscated — headers
+  `r.Header`, not the mutated `proxyReq.Header`.) A test asserts the resolved key is absent
+  from request- and response-header logs and from all error strings.
 - **FR7 — Cache.** Resolved keys are cached by `(provider, provider_url, api_token)`, reused
-  within `cache_ttl`, evicted past it or when `cache_size` is exceeded; concurrent requests
-  are safe.
+  within `cache_ttl`, evicted past it or when `cache_size` is exceeded; concurrent-safe.
 
 ## Technical Decisions
 
-- **A command, not a built-in keystore.** Keeps llm-proxy general and language-agnostic and
-  gives a clean seam for the future key server (PRI-1896). Matches the "run a local command
-  to swap the token" model.
-- **JSON on stdin.** Carries the context and keeps the token off argv; extensible — new
-  fields need no contract change.
-- **v1 context is only what's available early.** Substitution must run before the session
-  block (so it covers non-conversation endpoints and precedes logging), and `model` /
-  `client_id` / session id are not available there. Including them would require new parsing
-  the v1 resolver doesn't use, so they are deferred.
-- **Cache key = `(provider, provider_url, api_token)`.** Matches what the v1 resolver
-  consumes (provider + endpoint) plus the bearer token, so it is correct and stable per
-  session (one token per box) rather than thrashing on per-request fields like `model`.
-- **Fail-closed is a deliberate primary-path gate.** When enabled, substitution is on the
-  critical path: a resolution failure rejects *that* request (401) and never forwards the
-  opaque token. This is intentionally *not* graceful degradation. The only "don't break the
-  primary path" guarantee is operational — one request's failure never crashes the proxy or
-  affects other requests.
-- **Validate box-controlled inputs.** `provider`/`provider_url` come from the client URL, so
-  they are validated against an allowlist/charset before any resolver invocation.
+- **A command, not a built-in keystore.** Keeps llm-proxy general and gives a clean seam for
+  the future key server (PRI-1896). Matches the "run a local command to swap the token" model.
+- **Resolver emits the key, not a reference.** stdout is used verbatim as the credential, so
+  the resolver must print the key's bytes (a file-backed resolver `cat`s its keyfile).
+- **JSON on stdin.** Carries the context, keeps the token off argv, and is extensible.
+- **v1 context is only what's available early.** Substitution must precede the session block
+  (to cover non-conversation endpoints and precede logging); `model`/`client_id`/session id
+  aren't available there and the v1 resolver doesn't use them, so they're deferred.
+- **Cache key = `(provider, provider_url, api_token)`.** Matches what the v1 resolver consumes
+  plus the bearer token — correct and stable per bearer token, not thrashing on per-request
+  fields like `model`.
+- **Fail-closed is a deliberate primary-path gate.** When enabled, a resolution failure
+  rejects *that* request (401) and never forwards the opaque token. This is intentionally not
+  graceful degradation; the only "don't break the primary path" guarantee is that one
+  request's failure never crashes the proxy or affects other requests.
+- **Validate box-controlled inputs.** `provider_url` comes from the client URL, so it is
+  charset-validated before any resolver invocation (provider is already gated by `ParseProxyURL`).
 - **Off by default.** Existing passthrough deployments are unaffected.
 
 ## Files to Create / Modify
@@ -152,33 +171,31 @@ future resolver's output depends on more dimensions, the keyed set becomes confi
 | File | Change |
 |------|--------|
 | `token_substitution.go` (new) | Resolver (exec the command with the context JSON on stdin, under `timeout`) + the in-memory cache keyed by `(provider, provider_url, api_token)` with TTL/size bounds; thread-safe. |
-| `config.go` | Add the `APITokenSubstitution` config struct, defaults, and `LLM_PROXY_API_TOKEN_SUBSTITUTION_*` env loading (env > TOML > defaults). |
-| `config.toml.example` | Document the `[api_token_substitution]` section. |
-| `proxy.go` | Run validation + substitution early (after `ParseProxyURL`/body buffer, before the `shouldLog` block and `client.Do`); `Set` the outbound auth header; fail-closed before logging. Add the resolver to the `Proxy` struct. |
+| `config.go` | Add the `APITokenSubstitution` config struct + defaults + `LLM_PROXY_API_TOKEN_SUBSTITUTION_*` env loading; add top-level `ListenHost` (`LLM_PROXY_LISTEN_HOST`, default `localhost`). |
+| `main.go` | Use the configured `listen_host` for the listener (currently hard-coded `localhost:%d` at line 241). |
+| `config.toml.example` | Document `[api_token_substitution]` and `listen_host`. |
+| `proxy.go` | Read the token; validate `provider_url`; resolve (after `ParseProxyURL`/remap); `Set` the auth header on `proxyReq` after `copyHeaders` (330), before the `shouldLog` block and `client.Do`; fail-closed before logging. Add the resolver to the `Proxy` struct. |
 | `server.go` | Construct the resolver from config and inject it into `Proxy`. |
-| `token_substitution_test.go` (new) | Table-driven unit tests (mocked resolver) + an integration test with a real script: success, invalid provider/provider_url, non-zero exit, empty output, timeout, command-not-found, cache hit / expiry / eviction, concurrency, and a non-conversation endpoint (`count_tokens`) getting substituted. |
+| `token_substitution_test.go` (new) | Table-driven unit tests (mocked resolver) + an integration test with a real script: success, invalid `provider_url`, non-zero exit, empty output, timeout, command-not-found, cache hit/expiry/eviction, concurrency, and a `count_tokens` (non-conversation) request being substituted. |
 
 ## Success Criteria
 
-- With the feature enabled and a resolver script, every proxied request — including
-  `count_tokens` and `models` — reaches the upstream carrying the real key, and responses
-  are normal.
-- A resolver that exits non-zero / empty / times out, or an invalid `provider`/`provider_url`
-  → the request gets `401`, the upstream is never contacted, and no session/request/turn log
-  is written for it.
+- With the feature enabled and a resolver script that prints a key, every proxied request —
+  including `count_tokens`/`models` — reaches the upstream carrying the real key.
+- A resolver that exits non-zero / empty / times out, or an invalid `provider_url`, → `401`,
+  no upstream contact, and no session/request/turn log for that request.
 - The real key never appears in any log, JSONL entry, the explorer, or an error message.
-- Within `cache_ttl`, repeated requests for the same `(provider, provider_url, token)` do not
+- Within `cache_ttl`, repeated requests for the same `(provider, provider_url, token)` don't
   re-run the command.
-- With the feature disabled (default), behavior is identical to today.
-- New code meets the constitution's testing bar (table-driven, ≥80% coverage,
-  concurrency-safe).
+- With the feature disabled (default), and with `listen_host` unset (default `localhost`),
+  behavior is identical to today.
+- New code meets the constitution's testing bar (table-driven, ≥80% coverage, concurrency-safe).
 
 ## Constitution Reference
 
-Follows `@docs/constitutions/current/` — proxy-layer placement; secrets-never-logged; the
-config precedence and `LLM_PROXY_*` env convention; and the testing standards (table-driven
-unit tests, live/integration separation, coverage, concurrency). Note: unlike the Loki
-exporter (which fails *open* as a degradable side-feature), token substitution when enabled
-is a primary-path gate and fails *closed* by design; the constitution's "don't break the
-primary path" rule is honored only in that a single request's failure never crashes the
-proxy or affects other requests.
+Follows `@docs/constitutions/current/` — proxy-layer placement; secrets-never-logged; config
+precedence + `LLM_PROXY_*` env convention; testing standards (table-driven, live/integration
+separation, coverage, concurrency). Unlike the Loki exporter (which fails *open* as a
+degradable side-feature), token substitution when enabled is a primary-path gate and fails
+*closed* by design; the constitution's "don't break the primary path" rule is honored only in
+that a single request's failure never crashes the proxy or affects other requests.
