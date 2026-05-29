@@ -53,17 +53,20 @@ via the constructor and wired in `server.go`.
 
 **Where the token is read.** The presented token is taken from the provider's auth header —
 `x-api-key` for Anthropic key-style auth, `Authorization: Bearer <token>` where the client
-uses it — reusing the existing key-header logic (`obfuscate.go` `isAPIKeyHeader`). That same
-header is what gets replaced in FR4.
+uses it — reusing the existing key-header logic (`obfuscate.go` `isAPIKeyHeader`). If both
+headers are present, `x-api-key` takes precedence. The header the token was read from is the
+one replaced in FR4, and any other client-supplied auth header is stripped so the opaque
+token never survives on the outbound request.
 
 **Integration point — resolve early, on every request; replace the header after copy.** In
 `proxy.go` `ServeHTTP`:
 - Read the token and (after `ParseProxyURL`, `proxy.go:283`, and after any provider-specific
   upstream remap — see below) build the context; validate; resolve. This is independent of
   the session/logging block (gated by `shouldLog`/`isConversationEndpoint`, `proxy.go:341`),
-  so it runs for **every** proxied endpoint — `/v1/messages`, `count_tokens`, `models`, etc.
-  (a non-conversation endpoint that skipped substitution would forward the opaque token and
-  401).
+  so it runs for every **`ParseProxyURL`-routed** endpoint — `/v1/messages`, `count_tokens`,
+  `models`, etc. (a non-conversation endpoint that skipped substitution would forward the
+  opaque token and 401). Bedrock `/model/*` requests return at `proxy.go:276` *before*
+  `ParseProxyURL` and are out of substitution scope in v1; Cloud Build is Anthropic-only.
 - **Apply the substitution by `Set`ting the auth header on the outbound `proxyReq` *after*
   `copyHeaders` (`proxy.go:330`)** — `copyHeaders` copies the client's headers onto `proxyReq`,
   so the replacement must follow it or it is clobbered — and before the `shouldLog` block
@@ -99,15 +102,18 @@ and rejects fail-closed if it fails — protecting resolvers that build filesyst
 shell out from box-controlled values.
 
 **Resolver contract:** the command receives the context JSON on stdin and runs under
-`timeout`. **Trimmed stdout is the real key itself (not a path or filename)** on exit 0;
-non-zero exit, empty output, timeout, or command-not-found = resolution failure →
-fail-closed.
+`timeout`. **Trimmed stdout is the real key itself (not a path or filename)** on exit 0. A
+resolution failure fails closed, with the status reflecting the cause: an input-validation or
+allowlist/auth rejection (clean non-zero exit, no key) → `401` (non-retryable); a transient
+resolver fault (timeout, spawn failure, command-not-found, or empty stdout) → `502`
+(retryable), so a client backs off instead of treating it as a bad credential.
 
 **Cache:** an in-memory map keyed by `(provider, provider_url, api_token)` — the fields the
 v1 resolver consumes plus the bearer token — value = the resolved key, expiring after
 `cache_ttl` and bounded by `cache_size` (oldest evicted on overflow). Thread-safe. If a
 future resolver's output depends on more dimensions, the keyed set becomes configurable
-(deferred).
+(deferred). Any context field passed to the resolver but absent from the cache key (e.g.
+`client_host` in v1) must not influence the resolved key until the keyed set is configurable.
 
 ## Related change: configurable listen address
 
@@ -134,10 +140,11 @@ guards against, so it is intended to be used only behind a host firewall / isola
 - **FR4 — Substitute.** On success the proxy `Set`s the provider auth header (the one the
   token came from) on `proxyReq` to the resolved key, **after `copyHeaders` (proxy.go:330)**,
   removing the client's value so the opaque token never rides alongside the real key.
-- **FR5 — Fail closed, before logging.** On invalid input, non-zero exit, empty stdout,
-  timeout, or command-not-found, the proxy returns `401`, does **not** contact the upstream,
-  and writes **no** session/request/turn log for that request. Error responses and log lines
-  never contain the token or any key.
+- **FR5 — Fail closed, before logging.** On a resolution failure the proxy returns `401`
+  (input-validation/allowlist rejection) or `502` (transient resolver fault: timeout, spawn
+  failure, command-not-found, empty stdout), does **not** contact the upstream, and writes
+  **no** session/request/turn log for that request. Error responses and log lines never
+  contain the token or any key.
 - **FR6 — Never expose the real key.** The resolved key appears in no log, JSONL entry, the
   explorer, or any error message. (The request logger records inbound — obfuscated — headers
   `r.Header`, not the mutated `proxyReq.Header`.) A test asserts the resolved key is absent
