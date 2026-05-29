@@ -102,11 +102,14 @@ and rejects fail-closed if it fails — protecting resolvers that build filesyst
 shell out from box-controlled values.
 
 **Resolver contract:** the command receives the context JSON on stdin and runs under
-`timeout`. **Trimmed stdout is the real key itself (not a path or filename)** on exit 0. A
-resolution failure fails closed, with the status reflecting the cause: an input-validation or
-allowlist/auth rejection (clean non-zero exit, no key) → `401` (non-retryable); a transient
-resolver fault (timeout, spawn failure, command-not-found, or empty stdout) → `502`
-(retryable), so a client backs off instead of treating it as a bad credential.
+`timeout`. **Trimmed stdout is the real key itself (not a path or filename)** on exit 0.
+Failure is fail-closed and the **exit code is authoritative**: any **non-zero exit** → `401`
+(the resolver rejected or could not authorize the request — an unknown/invalid token, a
+failed allowlist check, or a missing keyfile a file-backed resolver `cat`s; non-retryable);
+a **timeout, spawn failure, command-not-found, or exit 0 with empty stdout** → `502` (the
+resolver malfunctioned or was unreachable; retryable), so a client backs off instead of
+treating it as a bad credential. An invalid `provider_url` (caught before the resolver runs)
+also → `401`.
 
 **Cache:** an in-memory map keyed by `(provider, provider_url, api_token)` — the fields the
 v1 resolver consumes plus the bearer token — value = the resolved key, expiring after
@@ -141,9 +144,9 @@ guards against, so it is intended to be used only behind a host firewall / isola
   token came from) on `proxyReq` to the resolved key, **after `copyHeaders` (proxy.go:330)**,
   removing the client's value so the opaque token never rides alongside the real key.
 - **FR5 — Fail closed, before logging.** On a resolution failure the proxy returns `401`
-  (input-validation/allowlist rejection) or `502` (transient resolver fault: timeout, spawn
-  failure, command-not-found, empty stdout), does **not** contact the upstream, and writes
-  **no** session/request/turn log for that request. Error responses and log lines never
+  (invalid `provider_url`, or the resolver exits non-zero) or `502` (timeout, spawn failure,
+  command-not-found, or exit 0 with empty stdout), does **not** contact the upstream, and
+  writes **no** session/request/turn log for that request. Error responses and log lines never
   contain the token or any key.
 - **FR6 — Never expose the real key.** The resolved key appears in no log, JSONL entry, the
   explorer, or any error message. (The request logger records inbound — obfuscated — headers
@@ -189,8 +192,9 @@ guards against, so it is intended to be used only behind a host firewall / isola
 
 - With the feature enabled and a resolver script that prints a key, every proxied request —
   including `count_tokens`/`models` — reaches the upstream carrying the real key.
-- A resolver that exits non-zero / empty / times out, or an invalid `provider_url`, → `401`,
-  no upstream contact, and no session/request/turn log for that request.
+- A resolver that exits **non-zero**, or an invalid `provider_url`, → `401`; a **timeout,
+  spawn failure, command-not-found, or exit-0-with-empty-stdout** → `502`; in both cases no
+  upstream contact and no session/request/turn log for that request.
 - The real key never appears in any log, JSONL entry, the explorer, or an error message.
 - Within `cache_ttl`, repeated requests for the same `(provider, provider_url, token)` don't
   re-run the command.
