@@ -159,6 +159,38 @@ func TestValidateBedrockRegion(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigAPITokenSubstitution(t *testing.T) {
+	c := DefaultConfig()
+	if c.ListenHost != "localhost" {
+		t.Errorf("ListenHost default = %q, want localhost", c.ListenHost)
+	}
+	if c.APITokenSubstitution.Enabled {
+		t.Error("APITokenSubstitution should be disabled by default")
+	}
+	if c.APITokenSubstitution.CacheTTLStr != "5m" || c.APITokenSubstitution.CacheSize != 10000 || c.APITokenSubstitution.TimeoutStr != "2s" {
+		t.Errorf("unexpected substitution defaults: %+v", c.APITokenSubstitution)
+	}
+}
+
+func TestLoadConfigFromEnvAPITokenSubstitution(t *testing.T) {
+	t.Setenv("LLM_PROXY_LISTEN_HOST", "10.0.100.1")
+	t.Setenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_ENABLED", "true")
+	t.Setenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_COMMAND", "/etc/llm-proxy/resolve-token")
+	t.Setenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_CACHE_TTL", "30s")
+	t.Setenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_CACHE_SIZE", "42")
+	t.Setenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_TIMEOUT", "1s")
+	c := LoadConfigFromEnv(DefaultConfig())
+	if c.ListenHost != "10.0.100.1" {
+		t.Errorf("ListenHost = %q", c.ListenHost)
+	}
+	if !c.APITokenSubstitution.Enabled || c.APITokenSubstitution.Command != "/etc/llm-proxy/resolve-token" {
+		t.Errorf("substitution env not applied: %+v", c.APITokenSubstitution)
+	}
+	if c.APITokenSubstitution.CacheTTLStr != "30s" || c.APITokenSubstitution.CacheSize != 42 || c.APITokenSubstitution.TimeoutStr != "1s" {
+		t.Errorf("substitution numeric/dur env not applied: %+v", c.APITokenSubstitution)
+	}
+}
+
 func TestLoadConfigFromTOML_LokiSection(t *testing.T) {
 	tomlContent := `
 port = 12071

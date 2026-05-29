@@ -28,6 +28,15 @@ type LokiConfig struct {
 	Environment  string `toml:"environment"`  // Environment label (development, staging, production)
 }
 
+// APITokenSubstitutionConfig configures the opt-in API token substitution feature.
+type APITokenSubstitutionConfig struct {
+	Enabled     bool   `toml:"enabled"`
+	Command     string `toml:"command"`    // local command; stdin gets the JSON context, stdout is the real key
+	CacheTTLStr string `toml:"cache_ttl"`  // duration string, e.g. "5m"
+	CacheSize   int    `toml:"cache_size"` // max cached entries (oldest evicted past this)
+	TimeoutStr  string `toml:"timeout"`    // per-resolve duration string, e.g. "2s"
+}
+
 type Config struct {
 	Port          int    `toml:"port"`
 	LogDir        string `toml:"log_dir"`
@@ -39,8 +48,10 @@ type Config struct {
 	Uninstall     bool   `toml:"-"`              // CLI-only, not persisted in config file
 	Status        bool   `toml:"-"`              // CLI-only, not persisted in config file
 	Explore       bool   `toml:"-"`              // CLI-only, not persisted in config file
-	ExplorePort   int    `toml:"explore_port"`
-	Loki          LokiConfig `toml:"loki"`
+	ExplorePort          int                        `toml:"explore_port"`
+	Loki                 LokiConfig                 `toml:"loki"`
+	ListenHost           string                     `toml:"listen_host"`
+	APITokenSubstitution APITokenSubstitutionConfig `toml:"api_token_substitution"`
 }
 
 func DefaultConfig() Config {
@@ -54,6 +65,13 @@ func DefaultConfig() Config {
 			RetryMax:     5,
 			UseGzip:      true,
 			Environment:  "development",
+		},
+		ListenHost: "localhost",
+		APITokenSubstitution: APITokenSubstitutionConfig{
+			Enabled:     false,
+			CacheTTLStr: "5m",
+			CacheSize:   10000,
+			TimeoutStr:  "2s",
 		},
 	}
 }
@@ -119,6 +137,27 @@ func LoadConfigFromEnv(cfg Config) Config {
 	}
 	if env := os.Getenv("LLM_PROXY_LOKI_ENVIRONMENT"); env != "" {
 		cfg.Loki.Environment = env
+	}
+
+	if host := os.Getenv("LLM_PROXY_LISTEN_HOST"); host != "" {
+		cfg.ListenHost = host
+	}
+	if v := os.Getenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_ENABLED"); v != "" {
+		cfg.APITokenSubstitution.Enabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_COMMAND"); v != "" {
+		cfg.APITokenSubstitution.Command = v
+	}
+	if v := os.Getenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_CACHE_TTL"); v != "" {
+		cfg.APITokenSubstitution.CacheTTLStr = v
+	}
+	if v := os.Getenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_CACHE_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.APITokenSubstitution.CacheSize = n
+		}
+	}
+	if v := os.Getenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_TIMEOUT"); v != "" {
+		cfg.APITokenSubstitution.TimeoutStr = v
 	}
 
 	return cfg

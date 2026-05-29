@@ -8,6 +8,8 @@ port = 12071
 # sessions.db is stored inside this directory
 log_dir = "./logs"
 
+listen_host = "localhost"   # bind address; set to the bridge gateway IP for a shared-host deploy
+
 # Loki log export configuration
 # Pushes logs to Grafana Loki for centralized observability
 [loki]
@@ -36,3 +38,10 @@ use_gzip = true
 # Environment label for Loki (default: "development")
 # Used as a label in Loki queries (e.g., development, staging, production)
 environment = "development"
+
+[api_token_substitution]
+enabled = false
+command = ""          # local command: JSON context on stdin, real key on stdout (exit 0)
+cache_ttl = "5m"
+cache_size = 10000
+timeout = "2s"
