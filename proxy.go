@@ -58,6 +58,7 @@ type Proxy struct {
 	eventEmitter   AgentEventEmitter
 	machineID      string
 	bedrock        *bedrockState
+	tokenSub       *APITokenSubstituter
 }
 
 // createPassthroughClient creates an HTTP client configured for true passthrough proxying
@@ -332,6 +333,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Set host header
 	proxyReq.Host = upstream
 
+	// API token substitution: resolve the presented token to the real provider key and replace the
+	// auth header. Runs on every endpoint, before any logging, fail-closed (no upstream on failure).
+	if p.tokenSub != nil {
+		token, hdrName := readClientToken(r.Header)
+		realKey, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
+			APIToken:    token,
+			ClientHost:  r.RemoteAddr,
+			Provider:    provider,
+			ProviderURL: upstream,
+		})
+		if status != 0 {
+			http.Error(w, "api token substitution failed", status)
+			return
+		}
+		setResolvedKey(proxyReq.Header, hdrName, realKey)
+	}
+
 	// Determine session ID and sequence for logging (conversation endpoints only)
 	var sessionID string
 	var seq int
@@ -510,6 +528,30 @@ func isJWTAuth(headers http.Header) bool {
 	}
 
 	return true
+}
+
+// readClientToken returns the presented token and which header it came from
+// ("x-api-key" or "authorization"); x-api-key takes precedence. Empty headerName = none present.
+func readClientToken(h http.Header) (token, headerName string) {
+	if v := h.Get("X-Api-Key"); v != "" {
+		return v, "x-api-key"
+	}
+	if v := h.Get("Authorization"); v != "" {
+		return strings.TrimPrefix(v, "Bearer "), "authorization"
+	}
+	return "", ""
+}
+
+// setResolvedKey strips both auth headers and sets the resolved key on the header the client used
+// (defaulting to x-api-key), so the opaque token never rides alongside the real key.
+func setResolvedKey(h http.Header, headerName, key string) {
+	h.Del("X-Api-Key")
+	h.Del("Authorization")
+	if headerName == "authorization" {
+		h.Set("Authorization", "Bearer "+key)
+	} else {
+		h.Set("X-Api-Key", key)
+	}
 }
 
 // isConversationEndpoint returns true for API endpoints that represent conversations

@@ -310,3 +310,80 @@ func TestIsConversationEndpoint(t *testing.T) {
 		}
 	}
 }
+
+func proxyWithSub(t *testing.T, scriptBody string) *Proxy {
+	t.Helper()
+	p := NewProxy()
+	p.tokenSub = newSub(t, writeScript(t, scriptBody))
+	return p
+}
+
+func TestSubstitutionReplacesKeyOnEveryEndpoint(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(r.Header.Get("X-Api-Key")))
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	p := proxyWithSub(t, `read -r _; echo REAL-KEY`)
+	for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens", "/v1/models"} {
+		req := httptest.NewRequest("POST", "/anthropic/"+host+path, strings.NewReader("{}"))
+		req.Header.Set("X-Api-Key", "nonce-not-real")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		if got := rec.Body.String(); got != "REAL-KEY" {
+			t.Errorf("%s: upstream saw key %q, want REAL-KEY", path, got)
+		}
+	}
+}
+
+func TestSubstitutionStripsBothAuthHeaders(t *testing.T) {
+	var seenAuth, seenKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		seenKey = r.Header.Get("X-Api-Key")
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	p := proxyWithSub(t, `read -r _; echo REAL-KEY`)
+	req := httptest.NewRequest("POST", "/anthropic/"+host+"/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("X-Api-Key", "nonce")
+	req.Header.Set("Authorization", "Bearer nonce")
+	p.ServeHTTP(httptest.NewRecorder(), req)
+	if seenKey != "REAL-KEY" || seenAuth != "" {
+		t.Errorf("x-api-key=%q authorization=%q; want REAL-KEY and empty", seenKey, seenAuth)
+	}
+}
+
+func TestSubstitutionFailClosedNoUpstream(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	p := proxyWithSub(t, `exit 1`)
+	req := httptest.NewRequest("POST", "/anthropic/"+host+"/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("X-Api-Key", "nonce")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("status=%d, want 401", rec.Code)
+	}
+	if called {
+		t.Error("upstream was contacted on a fail-closed resolution")
+	}
+}
+
+func TestSubstitutionDisabledIsPassthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(r.Header.Get("X-Api-Key")))
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	p := NewProxy() // tokenSub nil
+	req := httptest.NewRequest("POST", "/anthropic/"+host+"/v1/messages", strings.NewReader("{}"))
+	req.Header.Set("X-Api-Key", "client-key-verbatim")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if got := rec.Body.String(); got != "client-key-verbatim" {
+		t.Errorf("passthrough changed the key: %q", got)
+	}
+}
