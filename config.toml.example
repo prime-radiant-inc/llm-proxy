@@ -8,7 +8,12 @@ port = 12071
 # sessions.db is stored inside this directory
 log_dir = "./logs"
 
-listen_host = "localhost"   # bind address; set to the bridge gateway IP for a shared-host deploy
+listen_host = "localhost"   # bind address; defaults to "localhost" (loopback-only)
+                            # SECURITY: this proxy has no authentication of its own.
+                            # Binding to any non-loopback address (e.g. a container bridge IP or 0.0.0.0)
+                            # exposes it to every process that can reach that interface.
+                            # Only do so when the interface is protected by a host firewall rule or
+                            # an isolated network bridge that prevents untrusted access.
 
 # Loki log export configuration
 # Pushes logs to Grafana Loki for centralized observability

@@ -19,13 +19,13 @@ var validBedrockRegions = map[string]bool{
 // LokiConfig holds configuration for Loki log export
 type LokiConfig struct {
 	Enabled      bool   `toml:"enabled"`
-	URL          string `toml:"url"`          // Full push endpoint URL, e.g., http://loki.example.com:3100/loki/api/v1/push
-	AuthToken    string `toml:"auth_token"`   // Bearer token for auth (optional)
-	BatchSize    int    `toml:"batch_size"`   // Number of entries per batch
-	BatchWaitStr string `toml:"batch_wait"`   // Duration string for batch timeout
-	RetryMax     int    `toml:"retry_max"`    // Maximum retry attempts
-	UseGzip      bool   `toml:"use_gzip"`     // Enable gzip compression
-	Environment  string `toml:"environment"`  // Environment label (development, staging, production)
+	URL          string `toml:"url"`         // Full push endpoint URL, e.g., http://loki.example.com:3100/loki/api/v1/push
+	AuthToken    string `toml:"auth_token"`  // Bearer token for auth (optional)
+	BatchSize    int    `toml:"batch_size"`  // Number of entries per batch
+	BatchWaitStr string `toml:"batch_wait"`  // Duration string for batch timeout
+	RetryMax     int    `toml:"retry_max"`   // Maximum retry attempts
+	UseGzip      bool   `toml:"use_gzip"`    // Enable gzip compression
+	Environment  string `toml:"environment"` // Environment label (development, staging, production)
 }
 
 // APITokenSubstitutionConfig configures the opt-in API token substitution feature.
@@ -38,16 +38,16 @@ type APITokenSubstitutionConfig struct {
 }
 
 type Config struct {
-	Port          int    `toml:"port"`
-	LogDir        string `toml:"log_dir"`
-	BedrockRegion string `toml:"bedrock_region"` // AWS region for Bedrock (empty = disabled)
-	ServiceMode   bool   `toml:"-"`              // CLI-only, not persisted in config file
-	SetupShell    bool   `toml:"-"`              // CLI-only, not persisted in config file
-	Env           bool   `toml:"-"`              // CLI-only, not persisted in config file
-	Setup         bool   `toml:"-"`              // CLI-only, not persisted in config file
-	Uninstall     bool   `toml:"-"`              // CLI-only, not persisted in config file
-	Status        bool   `toml:"-"`              // CLI-only, not persisted in config file
-	Explore       bool   `toml:"-"`              // CLI-only, not persisted in config file
+	Port                 int                        `toml:"port"`
+	LogDir               string                     `toml:"log_dir"`
+	BedrockRegion        string                     `toml:"bedrock_region"` // AWS region for Bedrock (empty = disabled)
+	ServiceMode          bool                       `toml:"-"`              // CLI-only, not persisted in config file
+	SetupShell           bool                       `toml:"-"`              // CLI-only, not persisted in config file
+	Env                  bool                       `toml:"-"`              // CLI-only, not persisted in config file
+	Setup                bool                       `toml:"-"`              // CLI-only, not persisted in config file
+	Uninstall            bool                       `toml:"-"`              // CLI-only, not persisted in config file
+	Status               bool                       `toml:"-"`              // CLI-only, not persisted in config file
+	Explore              bool                       `toml:"-"`              // CLI-only, not persisted in config file
 	ExplorePort          int                        `toml:"explore_port"`
 	Loki                 LokiConfig                 `toml:"loki"`
 	ListenHost           string                     `toml:"listen_host"`

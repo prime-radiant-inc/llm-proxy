@@ -387,3 +387,104 @@ func TestSubstitutionDisabledIsPassthrough(t *testing.T) {
 		t.Errorf("passthrough changed the key: %q", got)
 	}
 }
+
+// TestSubstitutionResolvedKeyNeverLogged is the FR6 regression test: the resolved
+// (real) API key must never appear in log files or in error strings returned to the
+// client, regardless of whether substitution succeeds or fails.
+func TestSubstitutionResolvedKeyNeverLogged(t *testing.T) {
+	const resolvedKey = "SECRET-REAL-KEY-9f3a"
+
+	// --- success path: resolved key must not appear in JSONL logs ---
+	t.Run("not in logs on success", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"type":"message","role":"assistant","content":[]}`))
+		}))
+		defer upstream.Close()
+		host := strings.TrimPrefix(upstream.URL, "http://")
+
+		logger, err := NewLogger(tmpDir)
+		if err != nil {
+			t.Fatalf("NewLogger: %v", err)
+		}
+		defer logger.Close()
+
+		p := NewProxyWithLogger(logger)
+		p.tokenSub = newSub(t, writeScript(t, "read -r _; echo "+resolvedKey))
+
+		req := httptest.NewRequest("POST", "/anthropic/"+host+"/v1/messages",
+			strings.NewReader(`{"model":"claude-x","messages":[]}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Api-Key", "inbound-nonce-zzz")
+
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		// Flush and close logger before reading files.
+		logger.Close()
+
+		// Walk every .jsonl file under tmpDir and assert the resolved key is absent.
+		var logFiles []string
+		filepath.Walk(tmpDir, func(path string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() && filepath.Ext(path) == ".jsonl" {
+				logFiles = append(logFiles, path)
+			}
+			return nil
+		})
+		if len(logFiles) == 0 {
+			t.Fatal("no .jsonl log files were created — check logging setup")
+		}
+		for _, f := range logFiles {
+			data, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatalf("reading %s: %v", f, err)
+			}
+			if strings.Contains(string(data), resolvedKey) {
+				t.Errorf("SECURITY: resolved key %q found in log file %s", resolvedKey, f)
+			}
+		}
+	})
+
+	// --- fail-closed path: resolved key must not appear in the error response ---
+	t.Run("not in error response on failure", func(t *testing.T) {
+		called := false
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer upstream.Close()
+		host := strings.TrimPrefix(upstream.URL, "http://")
+
+		p := NewProxy()
+		p.tokenSub = newSub(t, writeScript(t, "exit 1"))
+
+		req := httptest.NewRequest("POST", "/anthropic/"+host+"/v1/messages", strings.NewReader("{}"))
+		req.Header.Set("X-Api-Key", "inbound-nonce-zzz")
+
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+
+		if called {
+			t.Error("upstream was contacted on a fail-closed resolution failure")
+		}
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401 on resolver failure, got %d", rec.Code)
+		}
+		body := rec.Body.String()
+		if strings.Contains(body, resolvedKey) {
+			t.Errorf("SECURITY: resolved key %q found in error response: %s", resolvedKey, body)
+		}
+		// Confirm the fixed error string is what the client sees (not an internal error that
+		// might inadvertently include key material in a future refactor).
+		if !strings.Contains(body, "api token substitution failed") {
+			t.Errorf("expected fixed error string, got: %s", body)
+		}
+	})
+}
