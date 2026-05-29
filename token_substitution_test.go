@@ -54,6 +54,9 @@ func TestResolveSuccessReadsStdinContext(t *testing.T) {
 	if !strings.Contains(gotStr, `"api_token":"nonce123"`) {
 		t.Fatalf("ctx.json missing api_token field: %s", gotStr)
 	}
+	if !strings.Contains(gotStr, `"provider_url":"api.anthropic.com"`) {
+		t.Fatalf("ctx.json missing provider_url field: %s", gotStr)
+	}
 }
 
 func TestResolveInvalidProviderURLis401(t *testing.T) {
