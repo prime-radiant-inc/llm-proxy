@@ -120,6 +120,13 @@ func openBrowser(url string) {
 	cmd.Start()
 }
 
+func listenAddr(host string, port int) string {
+	if host == "" {
+		host = "localhost"
+	}
+	return fmt.Sprintf("%s:%d", host, port)
+}
+
 func main() {
 	flags, err := ParseCLIFlags(os.Args[1:])
 	if err != nil {
@@ -234,11 +241,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Bind to localhost only — the proxy has no authentication, so binding to
+	// Bind to localhost by default — the proxy has no authentication, so binding to
 	// all interfaces would allow unauthenticated access if security groups are
 	// misconfigured. In ECS awsvpc mode, localhost is shared between containers
 	// in the same task, so the PA container can still reach the proxy.
-	addr := fmt.Sprintf("localhost:%d", cfg.Port)
+	// A non-loopback listen_host is opt-in via config.
+	addr := listenAddr(cfg.ListenHost, cfg.Port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error binding to %s: %v\n", addr, err)

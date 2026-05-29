@@ -131,3 +131,20 @@ func TestParseCLIFlagsUninstall(t *testing.T) {
 		t.Error("expected Uninstall flag to be true")
 	}
 }
+
+func TestListenAddr(t *testing.T) {
+	cases := []struct {
+		host string
+		port int
+		want string
+	}{
+		{"", 9999, "localhost:9999"},
+		{"localhost", 9999, "localhost:9999"},
+		{"10.0.100.1", 65500, "10.0.100.1:65500"},
+	}
+	for _, c := range cases {
+		if got := listenAddr(c.host, c.port); got != c.want {
+			t.Errorf("listenAddr(%q,%d)=%q want %q", c.host, c.port, got, c.want)
+		}
+	}
+}
