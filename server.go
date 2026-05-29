@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync/atomic"
@@ -92,6 +93,14 @@ func NewServer(cfg Config) (*Server, error) {
 		}
 		proxy.bedrock = bedrock
 		log.Printf("Bedrock: enabled (region=%s)", cfg.BedrockRegion)
+	}
+
+	if cfg.APITokenSubstitution.Enabled {
+		sub, err := NewAPITokenSubstituter(cfg.APITokenSubstitution)
+		if err != nil {
+			return nil, fmt.Errorf("api token substitution: %w", err)
+		}
+		proxy.tokenSub = sub
 	}
 
 	s := &Server{

@@ -330,3 +330,30 @@ func TestHealthBedrock_Disabled(t *testing.T) {
 		t.Errorf("expected status 'disabled', got %q", response["status"])
 	}
 }
+
+func TestNewServerWiresTokenSubWhenEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LogDir = t.TempDir()
+	cfg.APITokenSubstitution = APITokenSubstitutionConfig{
+		Enabled: true, Command: "/bin/true", CacheTTLStr: "1m", CacheSize: 10, TimeoutStr: "1s",
+	}
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.proxy.tokenSub == nil {
+		t.Error("expected tokenSub to be wired when enabled")
+	}
+}
+
+func TestNewServerNoTokenSubWhenDisabled(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LogDir = t.TempDir()
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.proxy.tokenSub != nil {
+		t.Error("tokenSub should be nil when disabled")
+	}
+}
