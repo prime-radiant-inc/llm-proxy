@@ -167,8 +167,14 @@ func TestDefaultConfigAPITokenSubstitution(t *testing.T) {
 	if c.APITokenSubstitution.Enabled {
 		t.Error("APITokenSubstitution should be disabled by default")
 	}
-	if c.APITokenSubstitution.CacheTTLStr != "5m" || c.APITokenSubstitution.CacheSize != 10000 || c.APITokenSubstitution.TimeoutStr != "2s" {
-		t.Errorf("unexpected substitution defaults: %+v", c.APITokenSubstitution)
+	if c.APITokenSubstitution.CacheTTLStr != "5m" {
+		t.Errorf("expected CacheTTLStr '5m', got %q", c.APITokenSubstitution.CacheTTLStr)
+	}
+	if c.APITokenSubstitution.CacheSize != 10000 {
+		t.Errorf("expected CacheSize 10000, got %d", c.APITokenSubstitution.CacheSize)
+	}
+	if c.APITokenSubstitution.TimeoutStr != "2s" {
+		t.Errorf("expected TimeoutStr '2s', got %q", c.APITokenSubstitution.TimeoutStr)
 	}
 }
 
@@ -188,6 +194,42 @@ func TestLoadConfigFromEnvAPITokenSubstitution(t *testing.T) {
 	}
 	if c.APITokenSubstitution.CacheTTLStr != "30s" || c.APITokenSubstitution.CacheSize != 42 || c.APITokenSubstitution.TimeoutStr != "1s" {
 		t.Errorf("substitution numeric/dur env not applied: %+v", c.APITokenSubstitution)
+	}
+}
+
+func TestLoadConfigFromTOML_APITokenSubstitution(t *testing.T) {
+	tomlContent := `
+listen_host = "0.0.0.0"
+
+[api_token_substitution]
+enabled = true
+command = "/usr/local/bin/resolve-token"
+cache_ttl = "10m"
+cache_size = 500
+timeout = "5s"
+`
+	cfg, err := LoadConfigFromTOML([]byte(tomlContent))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.ListenHost != "0.0.0.0" {
+		t.Errorf("expected ListenHost '0.0.0.0', got %q", cfg.ListenHost)
+	}
+	if cfg.APITokenSubstitution.Enabled != true {
+		t.Errorf("expected APITokenSubstitution.Enabled true, got %v", cfg.APITokenSubstitution.Enabled)
+	}
+	if cfg.APITokenSubstitution.Command != "/usr/local/bin/resolve-token" {
+		t.Errorf("expected Command '/usr/local/bin/resolve-token', got %q", cfg.APITokenSubstitution.Command)
+	}
+	if cfg.APITokenSubstitution.CacheTTLStr != "10m" {
+		t.Errorf("expected CacheTTLStr '10m', got %q", cfg.APITokenSubstitution.CacheTTLStr)
+	}
+	if cfg.APITokenSubstitution.CacheSize != 500 {
+		t.Errorf("expected CacheSize 500, got %d", cfg.APITokenSubstitution.CacheSize)
+	}
+	if cfg.APITokenSubstitution.TimeoutStr != "5s" {
+		t.Errorf("expected TimeoutStr '5s', got %q", cfg.APITokenSubstitution.TimeoutStr)
 	}
 }
 
