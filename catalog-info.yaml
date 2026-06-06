@@ -1,0 +1,14 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: llm-proxy
+  description: "Transparent logging proxy for LLM API traffic that records every request/response to Claude, OpenAI, and other providers."
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+    prime-radiant.com/repo-map-rev: "ddf1f68022938218e985f3015768b57e4955fe24"
+  tags: [go, proxy, logging, observability, llm, anthropic, openai]
+spec:
+  type: tool
+  lifecycle: production
+  owner: user:obra
+  system: infra
