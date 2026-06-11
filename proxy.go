@@ -278,6 +278,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Route Bedrock Mantle (OpenAI Responses API) requests before ParseProxyURL —
+	// these use the /mantle/... format, not /{provider}/{upstream}/{path}
+	if strings.HasPrefix(r.URL.Path, "/mantle/") {
+		p.serveMantle(w, r)
+		return
+	}
+
 	startTime := time.Now()
 
 	// Parse the proxy URL

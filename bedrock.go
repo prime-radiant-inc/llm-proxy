@@ -2,10 +2,7 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,9 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	"github.com/google/uuid"
 )
@@ -139,15 +133,15 @@ func decodeBedrockEventstream(buf []byte) ([]StreamChunk, error) {
 
 // bedrockState holds per-proxy Bedrock resources initialized at startup.
 type bedrockState struct {
-	region     string
-	credProv   aws.CredentialsProvider
-	signer    *v4.Signer
-	client    *http.Client
-	semaphore chan struct{}
+	region       string
+	client       *http.Client
+	semaphore    chan struct{}
 	decodeErrors int64 // atomic counter
 }
 
 // initBedrock initializes Bedrock resources. Returns nil if Bedrock is not configured.
+// The proxy holds no AWS credentials: per-request auth is a real Bedrock Bearer key
+// resolved from the client's opaque nonce, so no AWS config is loaded here.
 func initBedrock(region string) (*bedrockState, error) {
 	if region == "" {
 		return nil, nil
@@ -157,18 +151,8 @@ func initBedrock(region string) (*bedrockState, error) {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
-	if err != nil {
-		return nil, fmt.Errorf("load AWS config: %w", err)
-	}
-
 	return &bedrockState{
-		region:   region,
-		credProv: cfg.Credentials,
-		signer:   v4.NewSigner(),
+		region: region,
 		client: &http.Client{
 			Transport: &http.Transport{
 				DisableCompression:    true,
@@ -181,12 +165,17 @@ func initBedrock(region string) (*bedrockState, error) {
 	}, nil
 }
 
-// serveBedrock handles Bedrock pass-through requests. The proxy signs requests
-// with SigV4, forwards to Bedrock, streams the response to the client, and
-// decodes the eventstream for observability after the stream completes.
+// serveBedrock handles Bedrock pass-through requests. The proxy resolves the
+// client's opaque nonce to a real Bedrock Bearer key, forwards to Bedrock with
+// that key, streams the response to the client, and decodes the eventstream for
+// observability after the stream completes.
 func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 	if p.bedrock == nil {
 		http.Error(w, "Bedrock not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if p.tokenSub == nil {
+		http.Error(w, "token substitution not configured", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -285,7 +274,8 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Whitelist headers — only copy Content-Type and Accept to avoid SigV4 conflicts
+	// Whitelist headers — only copy Content-Type and Accept; the client's opaque
+	// nonce never rides upstream alongside the resolved Bearer key.
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		proxyReq.Header.Set("Content-Type", ct)
 	}
@@ -293,17 +283,20 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 		proxyReq.Header.Set("Accept", accept)
 	}
 
-	// SigV4 sign the request
-	bodyHash := sha256Hex(reqBody)
-	creds, err := p.bedrock.credProv.Retrieve(r.Context())
-	if err != nil {
-		http.Error(w, "failed to retrieve AWS credentials", http.StatusInternalServerError)
+	// Resolve the client's opaque nonce to a real short-lived Bedrock Bearer key.
+	// Fail closed: no upstream call on resolution failure.
+	nonce, _ := readClientToken(r.Header)
+	realKey, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
+		APIToken:    nonce,
+		ClientHost:  r.RemoteAddr,
+		Provider:    provider,
+		ProviderURL: upstream,
+	})
+	if status != 0 {
+		http.Error(w, "api token substitution failed", status)
 		return
 	}
-	if err := p.bedrock.signer.SignHTTP(r.Context(), creds, proxyReq, bodyHash, "bedrock", p.bedrock.region, time.Now()); err != nil {
-		http.Error(w, "failed to sign request", http.StatusInternalServerError)
-		return
-	}
+	proxyReq.Header.Set("Authorization", "Bearer "+realKey)
 
 	// Send to Bedrock
 	resp, err := p.bedrock.client.Do(proxyReq)
@@ -418,10 +411,4 @@ func (p *Proxy) serveBedrockNonStreaming(w http.ResponseWriter, resp *http.Respo
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
-}
-
-// sha256Hex returns the hex-encoded SHA256 hash of the data.
-func sha256Hex(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
 }

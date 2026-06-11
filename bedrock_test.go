@@ -10,9 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 )
 
 // --- Step 3a: LimitedWriter and model ID validation ---
@@ -215,19 +212,10 @@ func TestDecodeBedrockEventstream_TruncatedInput(t *testing.T) {
 
 // --- Step 3c: serveBedrock integration tests ---
 
-// staticCredentials provides fixed AWS credentials for testing.
-type staticCredentials struct{}
-
-func (s staticCredentials) Retrieve(ctx context.Context) (aws.Credentials, error) {
-	return aws.Credentials{
-		AccessKeyID:     "AKIAIOSFODNN7EXAMPLE",
-		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-		Source:          "test",
-	}, nil
-}
-
 // newTestBedrockProxy creates a Proxy with a mock Bedrock backend for testing.
-// The mockHandler receives the proxied request after SigV4 signing.
+// The mockHandler receives the proxied request after the nonce→Bearer swap.
+// The attached resolver echoes a fixed key "REAL-BEARER" so tests can assert the
+// forwarded Authorization header.
 func newTestBedrockProxy(t *testing.T, mockHandler http.HandlerFunc) (*Proxy, *httptest.Server) {
 	t.Helper()
 
@@ -250,10 +238,9 @@ func newTestBedrockProxy(t *testing.T, mockHandler http.HandlerFunc) (*Proxy, *h
 		client:         createPassthroughClient(),
 		logger:         logger,
 		sessionManager: sm,
+		tokenSub:       newSub(t, writeScript(t, "read -r _; echo REAL-BEARER")),
 		bedrock: &bedrockState{
-			region:   "us-west-2",
-			credProv: staticCredentials{},
-			signer:   v4.NewSigner(),
+			region: "us-west-2",
 			client: &http.Client{
 				Transport: &http.Transport{
 					DisableCompression: true,
@@ -309,12 +296,12 @@ func TestServeBedrock_StreamingRoundTrip(t *testing.T) {
 		t.Errorf("response body length = %d, want %d", w.Body.Len(), len(fixtureData))
 	}
 
-	// Verify SigV4 signing happened
-	if receivedAuth == "" {
-		t.Error("expected Authorization header from SigV4 signing")
+	// Verify the nonce was swapped for the resolved real Bearer key (no SigV4).
+	if receivedAuth != "Bearer REAL-BEARER" {
+		t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer REAL-BEARER")
 	}
-	if !strings.Contains(receivedAuth, "AWS4-HMAC-SHA256") {
-		t.Errorf("Authorization = %q, want AWS4-HMAC-SHA256 signature", receivedAuth)
+	if strings.Contains(receivedAuth, "AWS4-HMAC-SHA256") {
+		t.Errorf("Authorization = %q, should NOT contain a SigV4 signature", receivedAuth)
 	}
 }
 
@@ -589,6 +576,158 @@ func TestServeBedrock_UsesAnthropicProvider(t *testing.T) {
 
 	if loggedProvider != "anthropic" {
 		t.Errorf("provider = %q, want 'anthropic' (Bedrock uses same provider for session tracking)", loggedProvider)
+	}
+}
+
+// --- Bearer-swap and /mantle tests ---
+
+func TestServeBedrock_TokenSubNotConfigured_Returns503(t *testing.T) {
+	called := false
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer mock.Close()
+
+	// Remove the resolver — serveBedrock must fail closed.
+	proxy.tokenSub = nil
+
+	req := httptest.NewRequest("POST", "/model/anthropic.claude-3-haiku-20240307-v1:0/invoke",
+		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.serveBedrock(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	if called {
+		t.Error("upstream should not be called when tokenSub is nil")
+	}
+}
+
+func TestServeBedrock_SwapsNonceForRealBearer(t *testing.T) {
+	var receivedAuth string
+	responseBody := `{"id":"msg","type":"message","role":"assistant","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(responseBody))
+	}))
+	defer mock.Close()
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	req := httptest.NewRequest("POST", "/model/anthropic.claude-3-haiku-20240307-v1:0/invoke",
+		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+	proxy.serveBedrock(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", w.Code, w.Body.String())
+	}
+	if receivedAuth != "Bearer REAL-BEARER" {
+		t.Errorf("upstream Authorization = %q, want %q", receivedAuth, "Bearer REAL-BEARER")
+	}
+}
+
+func TestServeMantle_HappyPath(t *testing.T) {
+	var receivedPath, receivedAuth string
+	responseBody := `{"id":"resp_123","object":"response","output":[]}`
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(responseBody))
+	}))
+	defer mock.Close()
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	req := httptest.NewRequest("POST", "/mantle/v1/responses",
+		strings.NewReader(`{"model":"gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+	// Exercise the ServeHTTP /mantle/ dispatch branch.
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", w.Code, w.Body.String())
+	}
+	if receivedPath != "/openai/v1/responses" {
+		t.Errorf("upstream path = %q, want /openai/v1/responses", receivedPath)
+	}
+	if receivedAuth != "Bearer REAL-BEARER" {
+		t.Errorf("upstream Authorization = %q, want %q", receivedAuth, "Bearer REAL-BEARER")
+	}
+	if !strings.Contains(w.Body.String(), "resp_123") {
+		t.Errorf("response body = %q, want it forwarded", w.Body.String())
+	}
+}
+
+func TestServeMantle_TokenSubNotConfigured_Returns503(t *testing.T) {
+	called := false
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer mock.Close()
+
+	proxy.tokenSub = nil
+
+	req := httptest.NewRequest("POST", "/mantle/v1/responses",
+		strings.NewReader(`{"model":"gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.serveMantle(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+	if called {
+		t.Error("upstream should not be called when tokenSub is nil")
+	}
+}
+
+func TestServeMantle_SSEStreaming(t *testing.T) {
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data: {\"type\":\"response.created\"}\n\n"))
+		w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer mock.Close()
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	req := httptest.NewRequest("POST", "/mantle/v1/responses",
+		strings.NewReader(`{"model":"gpt-5.5","input":"hi","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	w := httptest.NewRecorder()
+	proxy.serveMantle(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "response.created") {
+		t.Errorf("body = %q, want it to contain the first SSE frame", body)
+	}
+	if !strings.Contains(body, "response.completed") {
+		t.Errorf("body = %q, want it to contain the second SSE frame", body)
 	}
 }
 
