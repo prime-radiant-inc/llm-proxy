@@ -731,6 +731,103 @@ func TestServeMantle_SSEStreaming(t *testing.T) {
 	}
 }
 
+func TestServeMantle_StripsInboundCredentials(t *testing.T) {
+	var receivedAuth, receivedAPIKey string
+	responseBody := `{"id":"resp_123","object":"response","output":[]}`
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		receivedAPIKey = r.Header.Get("X-Api-Key")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(responseBody))
+	}))
+	defer mock.Close()
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	req := httptest.NewRequest("POST", "/mantle/v1/responses",
+		strings.NewReader(`{"model":"gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	// Hostile inbound credentials must NOT ride upstream alongside the resolved key.
+	req.Header.Set("X-Api-Key", "hostile")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+	proxy.serveMantle(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", w.Code, w.Body.String())
+	}
+	if receivedAuth != "Bearer REAL-BEARER" {
+		t.Errorf("upstream Authorization = %q, want %q", receivedAuth, "Bearer REAL-BEARER")
+	}
+	if receivedAPIKey != "" {
+		t.Errorf("upstream X-Api-Key = %q, want empty (inbound creds must be stripped)", receivedAPIKey)
+	}
+}
+
+func TestServeMantle_RejectsNonCanonicalPath(t *testing.T) {
+	called := false
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer mock.Close()
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	// A `..` namespace-escape attempt: rest=/v1/../../model/foo is non-canonical.
+	req := httptest.NewRequest("POST", "/mantle/v1/../../model/foo",
+		strings.NewReader(`{"model":"gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+	// Route through ServeHTTP to exercise the real dispatch + guard.
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for non-canonical path", w.Code)
+	}
+	if called {
+		t.Error("upstream must NOT be called for a non-canonical mantle path")
+	}
+}
+
+func TestServeMantle_ForwardsMethod(t *testing.T) {
+	var receivedMethod string
+	responseBody := `{"id":"resp_123","object":"response","output":[]}`
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(responseBody))
+	}))
+	defer mock.Close()
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	req := httptest.NewRequest("POST", "/mantle/v1/responses",
+		strings.NewReader(`{"model":"gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+	proxy.serveMantle(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", w.Code, w.Body.String())
+	}
+	if receivedMethod != "POST" {
+		t.Errorf("upstream method = %q, want POST (the real verb must be forwarded)", receivedMethod)
+	}
+}
+
 // providerCapture wraps a ProxyLogger to capture the provider used in LogRequest.
 type providerCapture struct {
 	inner            ProxyLogger

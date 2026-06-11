@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 )
@@ -26,6 +27,15 @@ func (p *Proxy) serveMantle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject non-canonical paths before any minting or upstream call. A literal
+	// `..` or double-slash would otherwise forward to /openai/../... and escape the
+	// upstream's namespace on the fixed host. Require the legitimate /v1/ prefix.
+	rest := strings.TrimPrefix(r.URL.Path, "/mantle")
+	if rest != path.Clean(rest) || !strings.HasPrefix(rest, "/v1/") {
+		http.Error(w, "invalid mantle path", http.StatusBadRequest)
+		return
+	}
+
 	// Acquire concurrency semaphore for backpressure.
 	select {
 	case p.bedrock.semaphore <- struct{}{}:
@@ -38,7 +48,7 @@ func (p *Proxy) serveMantle(w http.ResponseWriter, r *http.Request) {
 	upstream := fmt.Sprintf("bedrock-mantle.%s.api.aws", p.bedrock.region)
 
 	// Map /mantle/v1/responses → /openai/v1/responses, preserving any query string.
-	targetPath := "/openai" + strings.TrimPrefix(r.URL.Path, "/mantle")
+	targetPath := "/openai" + rest
 	upstreamURL := fmt.Sprintf("https://%s%s", upstream, targetPath)
 	if r.URL.RawQuery != "" {
 		upstreamURL += "?" + r.URL.RawQuery
@@ -70,7 +80,7 @@ func (p *Proxy) serveMantle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(reqBody))
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(reqBody))
 	if err != nil {
 		http.Error(w, "failed to create request", http.StatusInternalServerError)
 		return
