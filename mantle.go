@@ -102,7 +102,7 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 		http.Error(w, "api token substitution failed", status)
 		return
 	}
-	if requiredRunID != "" && resolved.RunID != requiredRunID {
+	if requiredRunID != "" && resolved.RunID != "" && resolved.RunID != requiredRunID {
 		p.logMantlePreUpstreamError(sessionID, requestID, requiredRunID, "", mantleRequestModel(reqBody), "unresolved_run_id", "unresolved cloud build run id", http.StatusForbidden)
 		http.Error(w, "unresolved cloud build run id", http.StatusForbidden)
 		return
@@ -112,6 +112,7 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(reqBody))
 	if err != nil {
+		p.logMantleTerminalErrorObservation(sessionID, requestID, requiredRunID, http.StatusInternalServerError, ResponseTiming{}, "request_create_failed", "failed to create upstream request", reqBody, nil)
 		http.Error(w, "failed to create request", http.StatusInternalServerError)
 		return
 	}
@@ -129,6 +130,9 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 	startTime := time.Now()
 	resp, err := p.bedrock.client.Do(proxyReq)
 	if err != nil {
+		p.logMantleTerminalErrorObservation(sessionID, requestID, requiredRunID, http.StatusBadGateway, ResponseTiming{
+			TotalMs: time.Since(startTime).Milliseconds(),
+		}, "upstream_request_failed", "upstream request failed", reqBody, nil)
 		http.Error(w, "upstream request failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -145,6 +149,9 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 			line, readErr := reader.ReadBytes('\n')
 			if len(line) > 0 {
 				if _, writeErr := sw.Write(line); writeErr != nil {
+					p.logMantleTerminalErrorObservation(sessionID, requestID, requiredRunID, resp.StatusCode, ResponseTiming{
+						TotalMs: time.Since(startTime).Milliseconds(),
+					}, "client_stream_write_failed", "client stream write failed", reqBody, sw.Chunks())
 					return
 				}
 				sw.Flush()
@@ -153,6 +160,9 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 				if readErr == io.EOF {
 					break
 				}
+				p.logMantleTerminalErrorObservation(sessionID, requestID, requiredRunID, resp.StatusCode, ResponseTiming{
+					TotalMs: time.Since(startTime).Milliseconds(),
+				}, "upstream_stream_read_failed", "upstream stream read failed", reqBody, sw.Chunks())
 				return
 			}
 		}
@@ -180,7 +190,7 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 	ttfb := time.Since(startTime)
 	observeBuf := &bytes.Buffer{}
 	limitedW := &LimitedWriter{W: observeBuf, N: bedrockMaxRequestBody}
-	tee := io.TeeReader(io.LimitReader(resp.Body, bedrockMaxRequestBody), limitedW)
+	tee := io.TeeReader(resp.Body, limitedW)
 
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -384,6 +394,28 @@ func (p *Proxy) logMantleResponseObservation(sessionID, requestID, runID string,
 		"timing":   timing,
 		"_meta":    p.newMantleMeta(sessionID, requestID, runID, model),
 		"response": response,
+	}
+	p.writeMantleObservation(sessionID, entry)
+}
+
+func (p *Proxy) logMantleTerminalErrorObservation(sessionID, requestID, runID string, status int, timing ResponseTiming, class, message string, reqBody []byte, chunks []StreamChunk) {
+	model := mantleRequestModel(reqBody)
+	entry := map[string]any{
+		"type":   "error",
+		"status": status,
+		"timing": timing,
+		"_meta":  p.newMantleMeta(sessionID, requestID, runID, model),
+		"error": map[string]any{
+			"class":   class,
+			"message": message,
+		},
+	}
+	if len(chunks) > 0 {
+		response := map[string]any{"chunks": chunks}
+		if body := mantleResponseBodyFromStream(chunks); body != nil {
+			response["body"] = body
+		}
+		entry["response"] = response
 	}
 	p.writeMantleObservation(sessionID, entry)
 }

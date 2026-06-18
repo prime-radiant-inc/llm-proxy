@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -331,6 +332,66 @@ exit 3`))
 	}
 }
 
+func TestServeMantleLogsUpstreamTransportErrorObservation(t *testing.T) {
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("mock server should not be called when custom RoundTripper is installed")
+	}))
+	defer mock.Close()
+
+	counterSub, counter := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"run-test"}`)
+	proxy.tokenSub = counterSub
+	proxy.bedrock.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, errors.New("dial boom")
+		}),
+	}
+
+	req := httptest.NewRequest("POST", "/cbrun/run-test/mantle/v1/responses", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502. body=%s", w.Code, w.Body.String())
+	}
+	if readResolverCalls(t, counter) != 1 {
+		t.Fatalf("resolver calls = %d, want 1", readResolverCalls(t, counter))
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 2 {
+		t.Fatalf("log entries = %d, want 2", len(entries))
+	}
+	requestMeta := entries[0]["_meta"].(map[string]any)
+	errorEntry := entries[1]
+	if got := errorEntry["type"]; got != "error" {
+		t.Fatalf("terminal entry type = %v, want error", got)
+	}
+	if got := errorEntry["status"]; got != float64(http.StatusBadGateway) {
+		t.Fatalf("terminal entry status = %v, want 502", got)
+	}
+	errorMeta := errorEntry["_meta"].(map[string]any)
+	if got := errorMeta["request_id"]; got != requestMeta["request_id"] {
+		t.Fatalf("error request_id = %v, want %v", got, requestMeta["request_id"])
+	}
+	if got := errorMeta["cloud_build_run_id"]; got != "run-test" {
+		t.Fatalf("error cloud_build_run_id = %v, want run-test", got)
+	}
+	errorInfo := errorEntry["error"].(map[string]any)
+	if got := errorInfo["class"]; got != "upstream_request_failed" {
+		t.Fatalf("error.class = %v, want upstream_request_failed", got)
+	}
+
+	_, rawLog := readObservationLogFile(t, proxy.logger.(*Logger))
+	for _, forbidden := range []string{"inbound-nonce", "Bearer", "REAL-BEARER"} {
+		if strings.Contains(string(rawLog), forbidden) {
+			t.Fatalf("log should not contain %q: %s", forbidden, string(rawLog))
+		}
+	}
+}
+
 func TestServeMantleWritesTelemetryContractObservationNonStreaming(t *testing.T) {
 	var receivedPath, receivedAuth string
 	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -521,6 +582,116 @@ func TestServeMantleNonStreamingPassThroughBeforeDrain(t *testing.T) {
 	}
 }
 
+func TestServeMantleLogsStreamingReadErrorObservation(t *testing.T) {
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("mock server should not be called when custom RoundTripper is installed")
+	}))
+	defer mock.Close()
+
+	counterSub, counter := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"run-test"}`)
+	proxy.tokenSub = counterSub
+	proxy.bedrock.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       &errAfterDataReadCloser{data: []byte("data: {\"type\":\"response.created\"}\n")},
+			}, nil
+		}),
+	}
+
+	req := httptest.NewRequest("POST", "/cbrun/run-test/mantle/v1/responses", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%s", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); !strings.Contains(body, "response.created") {
+		t.Fatalf("stream body = %q, want partial SSE event", body)
+	}
+	if readResolverCalls(t, counter) != 1 {
+		t.Fatalf("resolver calls = %d, want 1", readResolverCalls(t, counter))
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 2 {
+		t.Fatalf("log entries = %d, want 2", len(entries))
+	}
+	errorEntry := entries[1]
+	if got := errorEntry["type"]; got != "error" {
+		t.Fatalf("terminal entry type = %v, want error", got)
+	}
+	if got := errorEntry["status"]; got != float64(http.StatusOK) {
+		t.Fatalf("terminal entry status = %v, want 200", got)
+	}
+	errorInfo := errorEntry["error"].(map[string]any)
+	if got := errorInfo["class"]; got != "upstream_stream_read_failed" {
+		t.Fatalf("error.class = %v, want upstream_stream_read_failed", got)
+	}
+	responseInfo := errorEntry["response"].(map[string]any)
+	chunks := responseInfo["chunks"].([]any)
+	if len(chunks) != 1 {
+		t.Fatalf("logged chunks = %d, want 1", len(chunks))
+	}
+}
+
+func TestServeMantleLogsStreamingWriteErrorObservation(t *testing.T) {
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("mock server should not be called when custom RoundTripper is installed")
+	}))
+	defer mock.Close()
+
+	counterSub, counter := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"run-test"}`)
+	proxy.tokenSub = counterSub
+	proxy.bedrock.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader("data: {\"type\":\"response.created\"}\n")),
+			}, nil
+		}),
+	}
+
+	req := httptest.NewRequest("POST", "/cbrun/run-test/mantle/v1/responses", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := &failingWriteResponseWriter{header: make(http.Header)}
+
+	proxy.ServeHTTP(w, req)
+
+	if w.status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.status)
+	}
+	if readResolverCalls(t, counter) != 1 {
+		t.Fatalf("resolver calls = %d, want 1", readResolverCalls(t, counter))
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 2 {
+		t.Fatalf("log entries = %d, want 2", len(entries))
+	}
+	errorEntry := entries[1]
+	if got := errorEntry["type"]; got != "error" {
+		t.Fatalf("terminal entry type = %v, want error", got)
+	}
+	errorInfo := errorEntry["error"].(map[string]any)
+	if got := errorInfo["class"]; got != "client_stream_write_failed" {
+		t.Fatalf("error.class = %v, want client_stream_write_failed", got)
+	}
+	responseInfo := errorEntry["response"].(map[string]any)
+	chunks := responseInfo["chunks"].([]any)
+	if len(chunks) != 1 {
+		t.Fatalf("logged chunks = %d, want 1 attempted chunk", len(chunks))
+	}
+}
+
 func TestServeMantleForwardsPercentEncodedSafeRunID(t *testing.T) {
 	var receivedPath, receivedAuth string
 	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -681,6 +852,59 @@ func TestServeMantleForwardsRunScopedPath(t *testing.T) {
 	}
 }
 
+func TestServeMantleForwardsRunScopedPathWithBareResolverMetadata(t *testing.T) {
+	var receivedPath, receivedAuth string
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"resp_123","object":"response","output":[]}`))
+	}))
+	defer mock.Close()
+
+	counterSub, counter := newCountingResolver(t, `REAL-BEARER`)
+	proxy.tokenSub = counterSub
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	req := httptest.NewRequest("POST", "/cbrun/run-123/mantle/v1/responses", strings.NewReader(`{"model":"gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%s", w.Code, w.Body.String())
+	}
+	if readResolverCalls(t, counter) != 1 {
+		t.Fatalf("resolver calls = %d, want 1", readResolverCalls(t, counter))
+	}
+	if receivedPath != "/openai/v1/responses" {
+		t.Fatalf("upstream path = %q, want /openai/v1/responses", receivedPath)
+	}
+	if receivedAuth != "Bearer REAL-BEARER" {
+		t.Fatalf("upstream auth = %q, want %q", receivedAuth, "Bearer REAL-BEARER")
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 2 {
+		t.Fatalf("log entries = %d, want 2", len(entries))
+	}
+	requestMeta := entries[0]["_meta"].(map[string]any)
+	if got := requestMeta["cloud_build_run_id"]; got != "run-123" {
+		t.Fatalf("request cloud_build_run_id = %v, want run-123", got)
+	}
+	responseMeta := entries[1]["_meta"].(map[string]any)
+	if got := responseMeta["request_id"]; got != requestMeta["request_id"] {
+		t.Fatalf("response request_id = %v, want %v", got, requestMeta["request_id"])
+	}
+}
+
 func TestServeMantleLogsStreamingObservationWithUsage(t *testing.T) {
 	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -754,6 +978,45 @@ type stagedReadCloser struct {
 	rest  []byte
 	wait  <-chan struct{}
 	step  int
+}
+
+type errAfterDataReadCloser struct {
+	data []byte
+	done bool
+}
+
+func (r *errAfterDataReadCloser) Read(p []byte) (int, error) {
+	if !r.done {
+		r.done = true
+		return copy(p, r.data), nil
+	}
+	return 0, errors.New("stream read boom")
+}
+
+func (r *errAfterDataReadCloser) Close() error {
+	return nil
+}
+
+type failingWriteResponseWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *failingWriteResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *failingWriteResponseWriter) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+
+func (w *failingWriteResponseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return 0, errors.New("client write boom")
 }
 
 func (r *stagedReadCloser) Read(p []byte) (int, error) {
