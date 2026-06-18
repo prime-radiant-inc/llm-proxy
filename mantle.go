@@ -13,10 +13,10 @@ import (
 
 var cloudBuildRunIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// serveMantle handles Bedrock Mantle (OpenAI Responses API) pass-through requests.
+// serveMantle handles the legacy Bedrock Mantle Responses API pass-through path.
 // It resolves the client's opaque nonce to a real Bedrock Bearer key and forwards
-// to the fixed bedrock-mantle.<region>.api.aws upstream, mapping /mantle/... paths
-// to /openai/... .
+// to the fixed bedrock-mantle.<region>.api.aws upstream, mapping
+// /mantle/v1/responses to /openai/v1/responses.
 //
 // Mantle observability (session tracking, event emission, response logging) is a
 // deliberate follow-up: this v1 path is intentionally lean pass-through only.
@@ -36,7 +36,8 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 
 	// Reject non-canonical paths before any minting or upstream call. A literal
 	// `..` or double-slash would otherwise forward to /openai/../... and escape the
-	// upstream's namespace on the fixed host. Require the legitimate /v1/ prefix.
+	// upstream's namespace on the fixed host. Require the legacy /v1/ prefix here;
+	// run-scoped /cbrun paths are tightened separately in parseCloudBuildMantlePath.
 	rest := strings.TrimPrefix(mantlePath, "/mantle")
 	if rest != path.Clean(rest) || !strings.HasPrefix(rest, "/v1/") {
 		http.Error(w, "invalid mantle path", http.StatusBadRequest)
@@ -129,13 +130,17 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 
 func parseCloudBuildMantlePath(path string) (runID string, mantlePath string, ok bool) {
 	const prefix = "/cbrun/"
+	const requiredSuffix = "mantle/v1/responses"
 	if !strings.HasPrefix(path, prefix) {
 		return "", "", false
 	}
 
 	rest := strings.TrimPrefix(path, prefix)
 	runID, suffix, found := strings.Cut(rest, "/")
-	if !found || !validCloudBuildRunID(runID) || !strings.HasPrefix(suffix, "mantle/v1/") {
+	if !found || strings.Contains(runID, "%") || strings.Contains(suffix, "%") {
+		return "", "", false
+	}
+	if !validCloudBuildRunID(runID) || suffix != requiredSuffix {
 		return "", "", false
 	}
 
