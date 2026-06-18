@@ -223,6 +223,16 @@ func (m *MultiWriter) LogResponse(sessionID, provider string, seq int, status in
 	return err
 }
 
+func (m *MultiWriter) LogObservation(sessionID, provider string, entry map[string]any) error {
+	err := m.file.LogObservation(sessionID, provider, entry)
+
+	if m.loki != nil {
+		m.loki.Push(entry, provider)
+	}
+
+	return err
+}
+
 // LogFork logs a fork event to both destinations.
 // File errors are returned; Loki errors are logged but don't fail.
 func (m *MultiWriter) LogFork(sessionID, provider string, fromSeq int, parentSession string) error {

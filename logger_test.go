@@ -190,3 +190,69 @@ func TestLogEntryHasMeta(t *testing.T) {
 		t.Errorf("Expected machine format user@host, got %s", machine)
 	}
 }
+
+func TestLoggerLogObservation(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	sessionID := "mantle-session-123"
+	provider := "openai"
+	upstream := "bedrock-mantle.us-west-2.api.aws"
+	logger.RegisterUpstream(sessionID, upstream)
+
+	entry := map[string]any{
+		"type": "request",
+		"_meta": map[string]any{
+			"schema_version":     "telemetry-contract-v0",
+			"cloud_build_run_id": "run-test",
+			"provider":           provider,
+			"provider_route":     "bedrock-mantle",
+			"wire_api":           "openai-responses",
+		},
+		"request": map[string]any{
+			"ingress_path": "/cbrun/run-test/mantle/v1/responses",
+		},
+	}
+
+	if err := logger.LogObservation(sessionID, provider, entry); err != nil {
+		t.Fatalf("Failed to log observation: %v", err)
+	}
+
+	today := time.Now().Format("2006-01-02")
+	logPath := filepath.Join(tmpDir, upstream, today, sessionID+".jsonl")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("Expected 1 line, got %d", len(lines))
+	}
+
+	var logged map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &logged); err != nil {
+		t.Fatalf("Failed to parse observation entry: %v", err)
+	}
+
+	request := logged["request"].(map[string]any)
+	if got := request["ingress_path"]; got != "/cbrun/run-test/mantle/v1/responses" {
+		t.Fatalf("request.ingress_path = %v, want /cbrun/run-test/mantle/v1/responses", got)
+	}
+
+	meta := logged["_meta"].(map[string]any)
+	if got := meta["cloud_build_run_id"]; got != "run-test" {
+		t.Fatalf("_meta.cloud_build_run_id = %v, want run-test", got)
+	}
+	if got := meta["provider_route"]; got != "bedrock-mantle" {
+		t.Fatalf("_meta.provider_route = %v, want bedrock-mantle", got)
+	}
+	if got := meta["wire_api"]; got != "openai-responses" {
+		t.Fatalf("_meta.wire_api = %v, want openai-responses", got)
+	}
+}

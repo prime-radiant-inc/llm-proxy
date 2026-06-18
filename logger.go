@@ -202,6 +202,10 @@ func (l *Logger) LogResponse(sessionID, provider string, seq int, status int, he
 	return l.writeEntry(sessionID, entry)
 }
 
+func (l *Logger) LogObservation(sessionID, provider string, entry map[string]any) error {
+	return l.writeEntry(sessionID, entry)
+}
+
 // LogFork records a fork event when conversation history diverges
 func (l *Logger) LogFork(sessionID, provider string, fromSeq int, parentSession string) error {
 	upstream := l.upstreams[sessionID]

@@ -47,6 +47,7 @@ type ProxyLogger interface {
 	LogSessionStart(sessionID, provider, upstream string) error
 	LogRequest(sessionID, provider string, seq int, method, path string, headers http.Header, body []byte, requestID string) error
 	LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string) error
+	LogObservation(sessionID, provider string, entry map[string]any) error
 	LogFork(sessionID, provider string, fromSeq int, parentSession string) error
 	Close() error
 }
@@ -284,6 +285,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.EscapedPath(), "/cbrun/") {
 		requiredRunID, mantlePath, ok := parseCloudBuildMantlePath(r.URL.EscapedPath())
 		if !ok {
+			p.logMantlePreUpstreamError(
+				p.generateSessionID(),
+				uuid.New().String(),
+				"",
+				extractRejectedCloudBuildRunID(r.URL.EscapedPath()),
+				"",
+				"invalid_run_id",
+				"invalid /cbrun run id",
+				http.StatusBadRequest,
+			)
 			http.Error(w, "invalid cloud build mantle path", http.StatusBadRequest)
 			return
 		}

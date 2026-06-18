@@ -18,6 +18,7 @@ type mockFileLogger struct {
 	sessionStartCalls     []sessionStartCall
 	requestCalls          []requestCall
 	responseCalls         []responseCall
+	observationCalls      []observationCall
 	forkCalls             []forkCall
 	closeCalls            int
 	closeError            error
@@ -26,6 +27,7 @@ type mockFileLogger struct {
 	sessionStartError error
 	requestError      error
 	responseError     error
+	observationError  error
 	forkError         error
 }
 
@@ -61,6 +63,12 @@ type responseCall struct {
 	chunks    []StreamChunk
 	timing    ResponseTiming
 	requestID string
+}
+
+type observationCall struct {
+	sessionID string
+	provider  string
+	entry     map[string]interface{}
 }
 
 type forkCall struct {
@@ -99,6 +107,13 @@ func (m *mockFileLogger) LogResponse(sessionID, provider string, seq int, status
 	defer m.mu.Unlock()
 	m.responseCalls = append(m.responseCalls, responseCall{sessionID, provider, seq, status, headers, body, chunks, timing, requestID})
 	return m.responseError
+}
+
+func (m *mockFileLogger) LogObservation(sessionID, provider string, entry map[string]interface{}) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.observationCalls = append(m.observationCalls, observationCall{sessionID, provider, entry})
+	return m.observationError
 }
 
 func (m *mockFileLogger) LogFork(sessionID, provider string, fromSeq int, parentSession string) error {
@@ -611,6 +626,42 @@ func TestMultiWriter_LogRequest_IncludesRequestSHA(t *testing.T) {
 	expectedSHA := computeSHA256([]byte(bodyFromEntry))
 	if sha != expectedSHA {
 		t.Errorf("SHA mismatch: entry has %s, computed %s", sha, expectedSHA)
+	}
+}
+
+func TestMultiWriterLogObservation(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	closeOrder := []string{}
+	lokiExporter := newMockLokiExporter(&closeOrder)
+
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+
+	entry := map[string]interface{}{
+		"type": "request",
+		"_meta": map[string]interface{}{
+			"schema_version": "telemetry-contract-v0",
+		},
+		"request": map[string]interface{}{
+			"ingress_path": "/cbrun/run-test/mantle/v1/responses",
+		},
+	}
+
+	if err := mw.LogObservation("mantle-session-123", "openai", entry); err != nil {
+		t.Fatalf("LogObservation returned error: %v", err)
+	}
+
+	if len(fileLogger.observationCalls) != 1 {
+		t.Fatalf("Expected 1 observation call to file logger, got %d", len(fileLogger.observationCalls))
+	}
+	if got := fileLogger.observationCalls[0].entry["type"]; got != "request" {
+		t.Fatalf("file logger observation type = %v, want request", got)
+	}
+
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+	if got := lokiExporter.pushCalls[0].entry["type"]; got != "request" {
+		t.Fatalf("Loki observation type = %v, want request", got)
 	}
 }
 
