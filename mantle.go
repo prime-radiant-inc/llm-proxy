@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"regexp"
 	"strings"
@@ -129,22 +130,20 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 }
 
 func parseCloudBuildMantlePath(path string) (runID string, mantlePath string, ok bool) {
-	const prefix = "/cbrun/"
-	const requiredSuffix = "mantle/v1/responses"
-	if !strings.HasPrefix(path, prefix) {
+	parts := strings.Split(path, "/")
+	if len(parts) != 6 || parts[0] != "" || parts[1] != "cbrun" || parts[3] != "mantle" || parts[4] != "v1" || parts[5] != "responses" {
 		return "", "", false
 	}
 
-	rest := strings.TrimPrefix(path, prefix)
-	runID, suffix, found := strings.Cut(rest, "/")
-	if !found || strings.Contains(runID, "%") || strings.Contains(suffix, "%") {
+	runID, err := url.PathUnescape(parts[2])
+	if err != nil {
 		return "", "", false
 	}
-	if !validCloudBuildRunID(runID) || suffix != requiredSuffix {
+	if !validCloudBuildRunID(runID) {
 		return "", "", false
 	}
 
-	return runID, "/" + suffix, true
+	return runID, "/mantle/v1/responses", true
 }
 
 func validCloudBuildRunID(runID string) bool {

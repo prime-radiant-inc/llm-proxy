@@ -216,6 +216,46 @@ func TestServeMantleRejectsUnresolvedRunIDBeforeUpstream(t *testing.T) {
 	}
 }
 
+func TestServeMantleForwardsPercentEncodedSafeRunID(t *testing.T) {
+	var receivedPath, receivedAuth string
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"resp_123","object":"response","output":[]}`))
+	}))
+	defer mock.Close()
+
+	counterSub, counter := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"run-123"}`)
+	proxy.tokenSub = counterSub
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	req := httptest.NewRequest("POST", "/cbrun/run%2D123/mantle/v1/responses", strings.NewReader(`{"model":"gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%s", w.Code, w.Body.String())
+	}
+	if readResolverCalls(t, counter) != 1 {
+		t.Fatalf("resolver calls = %d, want 1", readResolverCalls(t, counter))
+	}
+	if receivedPath != "/openai/v1/responses" {
+		t.Fatalf("upstream path = %q, want /openai/v1/responses", receivedPath)
+	}
+	if receivedAuth != "Bearer REAL-BEARER" {
+		t.Fatalf("upstream auth = %q, want %q", receivedAuth, "Bearer REAL-BEARER")
+	}
+}
+
 func TestServeMantleForwardsRunScopedPath(t *testing.T) {
 	var receivedPath, receivedAuth string
 	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
