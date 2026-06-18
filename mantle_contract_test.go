@@ -38,18 +38,7 @@ func readResolverCalls(t *testing.T, counter string) int {
 func readObservationLogEntries(t *testing.T, logger *Logger) []map[string]any {
 	t.Helper()
 
-	paths, err := filepath.Glob(filepath.Join(logger.baseDir, "*", "*", "*.jsonl"))
-	if err != nil {
-		t.Fatalf("glob log entries: %v", err)
-	}
-	if len(paths) != 1 {
-		t.Fatalf("expected 1 log file, got %d (%v)", len(paths), paths)
-	}
-
-	data, err := os.ReadFile(paths[0])
-	if err != nil {
-		t.Fatalf("read log file: %v", err)
-	}
+	_, data := readObservationLogFile(t, logger)
 
 	var entries []map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
@@ -63,6 +52,24 @@ func readObservationLogEntries(t *testing.T, logger *Logger) []map[string]any {
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+func readObservationLogFile(t *testing.T, logger *Logger) (string, []byte) {
+	t.Helper()
+
+	paths, err := filepath.Glob(filepath.Join(logger.baseDir, "*", "*", "*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob log entries: %v", err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("expected 1 log file, got %d (%v)", len(paths), paths)
+	}
+
+	data, err := os.ReadFile(paths[0])
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	return paths[0], data
 }
 
 func TestServeMantleRejectsBarePathWhenRunIDRequired(t *testing.T) {
@@ -269,6 +276,58 @@ func TestServeMantleRejectsUnresolvedRunIDBeforeUpstream(t *testing.T) {
 	errorInfo := entries[0]["error"].(map[string]any)
 	if got := errorInfo["class"]; got != "unresolved_run_id" {
 		t.Fatalf("error.class = %v, want unresolved_run_id", got)
+	}
+}
+
+func TestServeMantleLogsTokenSubstitutionFailureObservationWithoutSecrets(t *testing.T) {
+	upstreamCalls := 0
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+	}))
+	defer mock.Close()
+
+	counter := filepath.Join(t.TempDir(), "resolver-count")
+	proxy.tokenSub = newSub(t, writeScript(t, `echo x >> `+counter+`
+exit 3`))
+
+	req := httptest.NewRequest("POST", "/cbrun/run-test/mantle/v1/responses", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401. body=%s", w.Code, w.Body.String())
+	}
+	if readResolverCalls(t, counter) != 1 {
+		t.Fatalf("resolver calls = %d, want 1", readResolverCalls(t, counter))
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", upstreamCalls)
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 1 {
+		t.Fatalf("log entries = %d, want 1", len(entries))
+	}
+	entry := entries[0]
+	if got := entry["type"]; got != "error" {
+		t.Fatalf("entry type = %v, want error", got)
+	}
+	if got := entry["status"]; got != float64(http.StatusUnauthorized) {
+		t.Fatalf("entry status = %v, want 401", got)
+	}
+	errorInfo := entry["error"].(map[string]any)
+	if got := errorInfo["class"]; got != "token_substitution_failed" {
+		t.Fatalf("error.class = %v, want token_substitution_failed", got)
+	}
+
+	logPath, rawLog := readObservationLogFile(t, proxy.logger.(*Logger))
+	for _, forbidden := range []string{"inbound-nonce", "Bearer", "REAL-BEARER"} {
+		if strings.Contains(string(rawLog), forbidden) {
+			t.Fatalf("log file %s should not contain %q: %s", logPath, forbidden, string(rawLog))
+		}
 	}
 }
 
