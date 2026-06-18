@@ -357,3 +357,18 @@ func TestNewServerNoTokenSubWhenDisabled(t *testing.T) {
 		t.Error("tokenSub should be nil when disabled")
 	}
 }
+
+func TestNewServerWiresMantleRunIDRequirement(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LogDir = t.TempDir()
+	cfg.MantleRequireCloudBuildRunID = true
+
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !srv.proxy.mantleRequireCloudBuildRunID {
+		t.Fatal("expected mantleRequireCloudBuildRunID to be wired to proxy")
+	}
+}

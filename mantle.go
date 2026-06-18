@@ -6,9 +6,12 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var cloudBuildRunIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // serveMantle handles Bedrock Mantle (OpenAI Responses API) pass-through requests.
 // It resolves the client's opaque nonce to a real Bedrock Bearer key and forwards
@@ -18,6 +21,10 @@ import (
 // Mantle observability (session tracking, event emission, response logging) is a
 // deliberate follow-up: this v1 path is intentionally lean pass-through only.
 func (p *Proxy) serveMantle(w http.ResponseWriter, r *http.Request) {
+	p.serveMantleForPath(w, r, "", r.URL.Path)
+}
+
+func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requiredRunID, mantlePath string) {
 	if p.bedrock == nil {
 		http.Error(w, "Bedrock not configured", http.StatusServiceUnavailable)
 		return
@@ -30,7 +37,7 @@ func (p *Proxy) serveMantle(w http.ResponseWriter, r *http.Request) {
 	// Reject non-canonical paths before any minting or upstream call. A literal
 	// `..` or double-slash would otherwise forward to /openai/../... and escape the
 	// upstream's namespace on the fixed host. Require the legitimate /v1/ prefix.
-	rest := strings.TrimPrefix(r.URL.Path, "/mantle")
+	rest := strings.TrimPrefix(mantlePath, "/mantle")
 	if rest != path.Clean(rest) || !strings.HasPrefix(rest, "/v1/") {
 		http.Error(w, "invalid mantle path", http.StatusBadRequest)
 		return
@@ -79,6 +86,10 @@ func (p *Proxy) serveMantle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "api token substitution failed", status)
 		return
 	}
+	if requiredRunID != "" && resolved.RunID != requiredRunID {
+		http.Error(w, "unresolved cloud build run id", http.StatusForbidden)
+		return
+	}
 
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(reqBody))
 	if err != nil {
@@ -114,4 +125,29 @@ func (p *Proxy) serveMantle(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, io.LimitReader(resp.Body, bedrockMaxRequestBody))
+}
+
+func parseCloudBuildMantlePath(path string) (runID string, mantlePath string, ok bool) {
+	const prefix = "/cbrun/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", false
+	}
+
+	rest := strings.TrimPrefix(path, prefix)
+	runID, suffix, found := strings.Cut(rest, "/")
+	if !found || !validCloudBuildRunID(runID) || !strings.HasPrefix(suffix, "mantle/v1/") {
+		return "", "", false
+	}
+
+	return runID, "/" + suffix, true
+}
+
+func validCloudBuildRunID(runID string) bool {
+	if runID == "" || runID == "." || runID == ".." || len(runID) > 128 {
+		return false
+	}
+	if runID[0] == '-' || strings.ContainsAny(runID, `/\`) {
+		return false
+	}
+	return cloudBuildRunIDRe.MatchString(runID)
 }

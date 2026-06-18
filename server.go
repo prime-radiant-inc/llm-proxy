@@ -79,6 +79,7 @@ func NewServer(cfg Config) (*Server, error) {
 	machineID := multiWriter.MachineID()
 
 	proxy := NewProxyWithEventEmitter(multiWriter, sessionManager, eventEmitter, machineID)
+	proxy.mantleRequireCloudBuildRunID = cfg.MantleRequireCloudBuildRunID
 
 	// Initialize Bedrock if region is configured
 	if cfg.BedrockRegion != "" {

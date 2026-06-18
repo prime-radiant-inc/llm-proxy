@@ -38,20 +38,21 @@ type APITokenSubstitutionConfig struct {
 }
 
 type Config struct {
-	Port                 int                        `toml:"port"`
-	LogDir               string                     `toml:"log_dir"`
-	BedrockRegion        string                     `toml:"bedrock_region"` // AWS region for Bedrock (empty = disabled)
-	ServiceMode          bool                       `toml:"-"`              // CLI-only, not persisted in config file
-	SetupShell           bool                       `toml:"-"`              // CLI-only, not persisted in config file
-	Env                  bool                       `toml:"-"`              // CLI-only, not persisted in config file
-	Setup                bool                       `toml:"-"`              // CLI-only, not persisted in config file
-	Uninstall            bool                       `toml:"-"`              // CLI-only, not persisted in config file
-	Status               bool                       `toml:"-"`              // CLI-only, not persisted in config file
-	Explore              bool                       `toml:"-"`              // CLI-only, not persisted in config file
-	ExplorePort          int                        `toml:"explore_port"`
-	Loki                 LokiConfig                 `toml:"loki"`
-	ListenHost           string                     `toml:"listen_host"`
-	APITokenSubstitution APITokenSubstitutionConfig `toml:"api_token_substitution"`
+	Port                         int                        `toml:"port"`
+	LogDir                       string                     `toml:"log_dir"`
+	BedrockRegion                string                     `toml:"bedrock_region"` // AWS region for Bedrock (empty = disabled)
+	MantleRequireCloudBuildRunID bool                       `toml:"mantle_require_cloud_build_run_id"`
+	ServiceMode                  bool                       `toml:"-"` // CLI-only, not persisted in config file
+	SetupShell                   bool                       `toml:"-"` // CLI-only, not persisted in config file
+	Env                          bool                       `toml:"-"` // CLI-only, not persisted in config file
+	Setup                        bool                       `toml:"-"` // CLI-only, not persisted in config file
+	Uninstall                    bool                       `toml:"-"` // CLI-only, not persisted in config file
+	Status                       bool                       `toml:"-"` // CLI-only, not persisted in config file
+	Explore                      bool                       `toml:"-"` // CLI-only, not persisted in config file
+	ExplorePort                  int                        `toml:"explore_port"`
+	Loki                         LokiConfig                 `toml:"loki"`
+	ListenHost                   string                     `toml:"listen_host"`
+	APITokenSubstitution         APITokenSubstitutionConfig `toml:"api_token_substitution"`
 }
 
 func DefaultConfig() Config {
@@ -107,6 +108,9 @@ func LoadConfigFromEnv(cfg Config) Config {
 	}
 	if region := os.Getenv("BEDROCK_REGION"); region != "" {
 		cfg.BedrockRegion = region
+	}
+	if v := os.Getenv("LLM_PROXY_MANTLE_REQUIRE_CLOUD_BUILD_RUN_ID"); v != "" {
+		cfg.MantleRequireCloudBuildRunID = v == "true" || v == "1"
 	}
 
 	// Loki configuration

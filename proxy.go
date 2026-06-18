@@ -52,13 +52,14 @@ type ProxyLogger interface {
 }
 
 type Proxy struct {
-	client         *http.Client
-	logger         ProxyLogger
-	sessionManager *SessionManager
-	eventEmitter   AgentEventEmitter
-	machineID      string
-	bedrock        *bedrockState
-	tokenSub       *APITokenSubstituter
+	client                       *http.Client
+	logger                       ProxyLogger
+	sessionManager               *SessionManager
+	eventEmitter                 AgentEventEmitter
+	machineID                    string
+	bedrock                      *bedrockState
+	tokenSub                     *APITokenSubstituter
+	mantleRequireCloudBuildRunID bool
 }
 
 // createPassthroughClient creates an HTTP client configured for true passthrough proxying
@@ -280,7 +281,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Route Bedrock Mantle (OpenAI Responses API) requests before ParseProxyURL —
 	// these use the /mantle/... format, not /{provider}/{upstream}/{path}
+	if strings.HasPrefix(r.URL.EscapedPath(), "/cbrun/") {
+		requiredRunID, mantlePath, ok := parseCloudBuildMantlePath(r.URL.EscapedPath())
+		if !ok {
+			http.Error(w, "invalid cloud build mantle path", http.StatusBadRequest)
+			return
+		}
+		p.serveMantleForPath(w, r, requiredRunID, mantlePath)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/mantle/") {
+		if p.mantleRequireCloudBuildRunID {
+			http.Error(w, "cloud build run id required", http.StatusBadRequest)
+			return
+		}
 		p.serveMantle(w, r)
 		return
 	}

@@ -140,12 +140,12 @@ func TestValidateBedrockRegion(t *testing.T) {
 		region  string
 		wantErr bool
 	}{
-		{"", false},           // empty = disabled, valid
-		{"us-west-2", false},  // supported
-		{"us-east-1", false},  // supported
-		{"us-east-2", false},  // supported
-		{"us-west-1", true},   // Bedrock not available
-		{"eu-west-1", true},   // not in our approved list
+		{"", false},          // empty = disabled, valid
+		{"us-west-2", false}, // supported
+		{"us-east-1", false}, // supported
+		{"us-east-2", false}, // supported
+		{"us-west-1", true},  // Bedrock not available
+		{"eu-west-1", true},  // not in our approved list
 		{"ap-southeast-1", true},
 	}
 
@@ -197,6 +197,16 @@ func TestLoadConfigFromEnvAPITokenSubstitution(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFromEnvMantleRequireCloudBuildRunID(t *testing.T) {
+	t.Setenv("LLM_PROXY_MANTLE_REQUIRE_CLOUD_BUILD_RUN_ID", "true")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	if !cfg.MantleRequireCloudBuildRunID {
+		t.Fatal("expected MantleRequireCloudBuildRunID to be true from env")
+	}
+}
+
 func TestLoadConfigFromTOML_APITokenSubstitution(t *testing.T) {
 	tomlContent := `
 listen_host = "0.0.0.0"
@@ -230,6 +240,17 @@ timeout = "5s"
 	}
 	if cfg.APITokenSubstitution.TimeoutStr != "5s" {
 		t.Errorf("expected TimeoutStr '5s', got %q", cfg.APITokenSubstitution.TimeoutStr)
+	}
+}
+
+func TestLoadConfigFromTOMLMantleRequireCloudBuildRunID(t *testing.T) {
+	cfg, err := LoadConfigFromTOML([]byte(`mantle_require_cloud_build_run_id = true`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !cfg.MantleRequireCloudBuildRunID {
+		t.Fatal("expected MantleRequireCloudBuildRunID to be true from TOML")
 	}
 }
 
