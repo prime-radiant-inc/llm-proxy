@@ -58,7 +58,6 @@ func TestServeMantleWritesTelemetryContractFixtures(t *testing.T) {
 		{
 			name:          "codex-invalid-run",
 			requestID:     "00000000-0000-4000-8000-000000000002",
-			sessionID:     "sess_example",
 			rejectedRunID: "-bad",
 			host:          "bedrock-mantle.us-west-2.api.aws",
 			baseTime:      baseTime.Add(10 * time.Second),
@@ -344,7 +343,11 @@ func normalizeFixtureEntries(entries []map[string]any, spec telemetryFixtureSpec
 			if entryType, _ := entry["type"].(string); entryType != "session_start" {
 				meta["request_id"] = spec.requestID
 			}
-			meta["session"] = spec.sessionID
+			if spec.sessionID != "" {
+				meta["session"] = spec.sessionID
+			} else {
+				delete(meta, "session")
+			}
 			delete(meta, "machine")
 			meta["host"] = spec.host
 			if _, ok := meta["cloud_build_run_id"]; ok {
