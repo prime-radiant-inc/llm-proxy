@@ -24,13 +24,11 @@ const (
 	mantleWireAPI       = "openai-responses"
 )
 
-// serveMantle handles the legacy Bedrock Mantle Responses API pass-through path.
-// It resolves the client's opaque nonce to a real Bedrock Bearer key and forwards
-// to the fixed bedrock-mantle.<region>.api.aws upstream, mapping
-// /mantle/v1/responses to /openai/v1/responses.
-//
-// Mantle observability (session tracking, event emission, response logging) is a
-// deliberate follow-up: this v1 path is intentionally lean pass-through only.
+// serveMantle handles the Bedrock Mantle Responses API pass-through path. It
+// resolves the client's opaque nonce to a real Bedrock Bearer key, forwards to
+// the fixed bedrock-mantle.<region>.api.aws upstream, maps /mantle/v1/responses
+// to /openai/v1/responses, and emits telemetry-contract-v0 observations for
+// Cloud Build replay.
 func (p *Proxy) serveMantle(w http.ResponseWriter, r *http.Request) {
 	p.serveMantleForPath(w, r, "", r.URL.Path)
 }
