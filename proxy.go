@@ -285,14 +285,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.EscapedPath(), "/cbrun/") {
 		requiredRunID, mantlePath, ok := parseCloudBuildMantlePath(r.URL.EscapedPath())
 		if !ok {
+			rejectedRunID, class, message := classifyCloudBuildMantlePathError(r.URL.EscapedPath())
 			p.logMantlePreUpstreamError(
 				p.generateSessionID(),
 				uuid.New().String(),
 				"",
-				extractRejectedCloudBuildRunID(r.URL.EscapedPath()),
+				rejectedRunID,
 				"",
-				"invalid_run_id",
-				"invalid /cbrun run id",
+				class,
+				message,
 				http.StatusBadRequest,
 			)
 			http.Error(w, "invalid cloud build mantle path", http.StatusBadRequest)

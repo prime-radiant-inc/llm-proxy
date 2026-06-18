@@ -215,7 +215,9 @@ func TestLoggerLogObservation(t *testing.T) {
 			"wire_api":           "openai-responses",
 		},
 		"request": map[string]any{
-			"ingress_path": "/cbrun/run-test/mantle/v1/responses",
+			"ingress_path":  "/cbrun/run-test/mantle/v1/responses",
+			"raw_query":     "trace=1",
+			"upstream_host": "bedrock-mantle.us-west-2.api.aws",
 		},
 	}
 
@@ -243,6 +245,12 @@ func TestLoggerLogObservation(t *testing.T) {
 	request := logged["request"].(map[string]any)
 	if got := request["ingress_path"]; got != "/cbrun/run-test/mantle/v1/responses" {
 		t.Fatalf("request.ingress_path = %v, want /cbrun/run-test/mantle/v1/responses", got)
+	}
+	if got := request["raw_query"]; got != "trace=1" {
+		t.Fatalf("request.raw_query = %v, want trace=1", got)
+	}
+	if got := request["upstream_host"]; got != "bedrock-mantle.us-west-2.api.aws" {
+		t.Fatalf("request.upstream_host = %v, want bedrock-mantle.us-west-2.api.aws", got)
 	}
 
 	meta := logged["_meta"].(map[string]any)

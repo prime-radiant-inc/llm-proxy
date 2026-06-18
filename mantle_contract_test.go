@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func newCountingResolver(t *testing.T, output string) (*APITokenSubstituter, string) {
@@ -287,7 +291,7 @@ func TestServeMantleWritesTelemetryContractObservationNonStreaming(t *testing.T)
 		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
 	}
 
-	req := httptest.NewRequest("POST", "/cbrun/run-test/mantle/v1/responses", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi"}`))
+	req := httptest.NewRequest("POST", "/cbrun/run-test/mantle/v1/responses?trace=1&prompt=two+words", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer inbound-nonce")
 	w := httptest.NewRecorder()
@@ -348,6 +352,12 @@ func TestServeMantleWritesTelemetryContractObservationNonStreaming(t *testing.T)
 	if got := requestInfo["upstream_path"]; got != "/openai/v1/responses" {
 		t.Fatalf("request.upstream_path = %v, want /openai/v1/responses", got)
 	}
+	if got := requestInfo["raw_query"]; got != "trace=1&prompt=two+words" {
+		t.Fatalf("request.raw_query = %v, want trace=1&prompt=two+words", got)
+	}
+	if got := requestInfo["upstream_host"]; got != "bedrock-mantle.us-west-2.api.aws" {
+		t.Fatalf("request.upstream_host = %v, want bedrock-mantle.us-west-2.api.aws", got)
+	}
 
 	responseEntry := entries[1]
 	if got := responseEntry["type"]; got != "response" {
@@ -366,6 +376,87 @@ func TestServeMantleWritesTelemetryContractObservationNonStreaming(t *testing.T)
 	if got := usage["output_tokens"]; got != float64(20) {
 		t.Fatalf("usage.output_tokens = %v, want 20", got)
 	}
+	if got := usage["total_tokens"]; got != float64(30) {
+		t.Fatalf("usage.total_tokens = %v, want 30", got)
+	}
+}
+
+func TestServeMantleNonStreamingPassThroughBeforeDrain(t *testing.T) {
+	const fullBody = `{"id":"resp_123","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"hello world"}]}],"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}`
+
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("mock server should not be called when custom RoundTripper is installed")
+	}))
+	defer mock.Close()
+
+	counterSub, counter := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"run-test"}`)
+	proxy.tokenSub = counterSub
+
+	releaseRest := make(chan struct{})
+	upstreamBody := &stagedReadCloser{
+		first: []byte(fullBody[:48]),
+		rest:  []byte(fullBody[48:]),
+		wait:  releaseRest,
+	}
+	proxy.bedrock.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusAccepted,
+				Header: http.Header{
+					"Content-Type": []string{"application/json"},
+					"X-Upstream":   []string{"mantle"},
+				},
+				Body: upstreamBody,
+			}, nil
+		}),
+	}
+
+	req := httptest.NewRequest("POST", "/cbrun/run-test/mantle/v1/responses", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+
+	rw := newProbeResponseWriter()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		proxy.ServeHTTP(rw, req)
+	}()
+
+	waitForSignal(t, rw.headerWritten, releaseRest, done, "expected headers/status before upstream body drained")
+	if rw.status != http.StatusAccepted {
+		close(releaseRest)
+		<-done
+		t.Fatalf("status = %d, want 202", rw.status)
+	}
+	if got := rw.Header().Get("X-Upstream"); got != "mantle" {
+		close(releaseRest)
+		<-done
+		t.Fatalf("X-Upstream header = %q, want mantle", got)
+	}
+
+	waitForSignal(t, rw.bodyWritten, releaseRest, done, "expected response body bytes before upstream body drained")
+	if got := rw.BodyString(); !strings.Contains(got, `{"id":"resp_123"`) {
+		close(releaseRest)
+		<-done
+		t.Fatalf("partial body = %q, want first chunk", got)
+	}
+
+	close(releaseRest)
+	<-done
+
+	if readResolverCalls(t, counter) != 1 {
+		t.Fatalf("resolver calls = %d, want 1", readResolverCalls(t, counter))
+	}
+	if got := rw.BodyString(); got != fullBody {
+		t.Fatalf("full body = %q, want %q", got, fullBody)
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 2 {
+		t.Fatalf("log entries = %d, want 2", len(entries))
+	}
+	responseBody := entries[1]["response"].(map[string]any)["body"].(map[string]any)
+	usage := responseBody["usage"].(map[string]any)
 	if got := usage["total_tokens"]; got != float64(30) {
 		t.Fatalf("usage.total_tokens = %v, want 30", got)
 	}
@@ -451,6 +542,43 @@ func TestServeMantleLogsNon2xxResponseObservation(t *testing.T) {
 	}
 	if got := responseEntry["status"]; got != float64(http.StatusTooManyRequests) {
 		t.Fatalf("response status = %v, want 429", got)
+	}
+}
+
+func TestServeMantleRejectsMalformedRunScopedSuffixWithDistinctClass(t *testing.T) {
+	upstreamCalls := 0
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+	}))
+	defer mock.Close()
+
+	counterSub, counter := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"run-123"}`)
+	proxy.tokenSub = counterSub
+
+	req := httptest.NewRequest("POST", "/cbrun/run-123/mantle/v1/responses/extra", strings.NewReader(`{"model":"gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400. body=%s", w.Code, w.Body.String())
+	}
+	if readResolverCalls(t, counter) != 0 {
+		t.Fatalf("resolver should not run for malformed mantle suffix")
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", upstreamCalls)
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 1 {
+		t.Fatalf("log entries = %d, want 1", len(entries))
+	}
+	errorInfo := entries[0]["error"].(map[string]any)
+	if got := errorInfo["class"]; got != "invalid_mantle_path" {
+		t.Fatalf("error.class = %v, want invalid_mantle_path", got)
 	}
 }
 
@@ -553,5 +681,100 @@ func TestServeMantleLogsStreamingObservationWithUsage(t *testing.T) {
 	}
 	if got := usage["total_tokens"]; got != float64(18) {
 		t.Fatalf("usage.total_tokens = %v, want 18", got)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type stagedReadCloser struct {
+	first []byte
+	rest  []byte
+	wait  <-chan struct{}
+	step  int
+}
+
+func (r *stagedReadCloser) Read(p []byte) (int, error) {
+	switch r.step {
+	case 0:
+		r.step++
+		return copy(p, r.first), nil
+	case 1:
+		<-r.wait
+		r.step++
+		return copy(p, r.rest), nil
+	default:
+		return 0, io.EOF
+	}
+}
+
+func (r *stagedReadCloser) Close() error {
+	return nil
+}
+
+type probeResponseWriter struct {
+	header        http.Header
+	status        int
+	body          bytes.Buffer
+	headerWritten chan struct{}
+	bodyWritten   chan struct{}
+	headerOnce    sync.Once
+	bodyOnce      sync.Once
+	mu            sync.Mutex
+}
+
+func newProbeResponseWriter() *probeResponseWriter {
+	return &probeResponseWriter{
+		header:        make(http.Header),
+		headerWritten: make(chan struct{}),
+		bodyWritten:   make(chan struct{}),
+	}
+}
+
+func (w *probeResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *probeResponseWriter) WriteHeader(status int) {
+	w.mu.Lock()
+	if w.status == 0 {
+		w.status = status
+	}
+	w.mu.Unlock()
+	w.headerOnce.Do(func() { close(w.headerWritten) })
+}
+
+func (w *probeResponseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.mu.Lock()
+	n, err := w.body.Write(p)
+	w.mu.Unlock()
+	if n > 0 {
+		w.bodyOnce.Do(func() { close(w.bodyWritten) })
+	}
+	return n, err
+}
+
+func (w *probeResponseWriter) BodyString() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.body.String()
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}, releaseRest chan struct{}, done <-chan struct{}, msg string) {
+	t.Helper()
+
+	select {
+	case <-signal:
+		return
+	case <-time.After(250 * time.Millisecond):
+		close(releaseRest)
+		<-done
+		t.Fatal(msg)
 	}
 }

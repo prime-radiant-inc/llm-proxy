@@ -108,7 +108,7 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 		return
 	}
 
-	p.logMantleRequestObservation(sessionID, requestID, requiredRunID, upstream, r.Method, r.URL.Path, mantlePath, targetPath, reqBody)
+	p.logMantleRequestObservation(sessionID, requestID, requiredRunID, upstream, r.Method, r.URL.Path, r.URL.RawQuery, mantlePath, targetPath, reqBody)
 
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(reqBody))
 	if err != nil {
@@ -178,13 +178,13 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 	}
 
 	ttfb := time.Since(startTime)
+	observeBuf := &bytes.Buffer{}
+	limitedW := &LimitedWriter{W: observeBuf, N: bedrockMaxRequestBody}
+	tee := io.TeeReader(io.LimitReader(resp.Body, bedrockMaxRequestBody), limitedW)
 
-	// Non-streaming: forward headers, status, and body (also forwards non-200 bodies).
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, bedrockMaxRequestBody))
-	if err != nil {
-		http.Error(w, "failed to read response body: "+err.Error(), http.StatusBadGateway)
-		return
-	}
+	copyHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, copyErr := io.Copy(w, tee)
 
 	p.logMantleResponseObservation(
 		sessionID,
@@ -195,14 +195,14 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 			TTFBMs:  ttfb.Milliseconds(),
 			TotalMs: time.Since(startTime).Milliseconds(),
 		},
-		decodeBodyForLogging(respBody, resp.Header),
+		decodeBodyForLogging(observeBuf.Bytes(), resp.Header),
 		nil,
 		reqBody,
 	)
 
-	copyHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	w.Write(respBody)
+	if copyErr != nil {
+		return
+	}
 }
 
 func parseCloudBuildMantlePath(path string) (runID string, mantlePath string, ok bool) {
@@ -230,6 +230,14 @@ func validCloudBuildRunID(runID string) bool {
 		return false
 	}
 	return cloudBuildRunIDRe.MatchString(runID)
+}
+
+func classifyCloudBuildMantlePathError(escapedPath string) (rejectedRunID, class, message string) {
+	rejectedRunID = extractRejectedCloudBuildRunID(escapedPath)
+	if rejectedRunID != "" && validCloudBuildRunID(rejectedRunID) {
+		return rejectedRunID, "invalid_mantle_path", "invalid cloud build mantle path"
+	}
+	return rejectedRunID, "invalid_run_id", "invalid /cbrun run id"
 }
 
 func mantleUpstreamHost(region string) string {
@@ -339,7 +347,7 @@ func (p *Proxy) logMantlePreUpstreamError(sessionID, requestID, runID, rejectedR
 	p.writeMantleObservation(sessionID, entry)
 }
 
-func (p *Proxy) logMantleRequestObservation(sessionID, requestID, runID, upstream, method, ingressPath, proxyRoute, upstreamPath string, reqBody []byte) {
+func (p *Proxy) logMantleRequestObservation(sessionID, requestID, runID, upstream, method, ingressPath, rawQuery, proxyRoute, upstreamPath string, reqBody []byte) {
 	body, _ := decodeObservationBody(reqBody)
 	model := mantleRequestModel(reqBody)
 	entry := map[string]any{
@@ -348,12 +356,13 @@ func (p *Proxy) logMantleRequestObservation(sessionID, requestID, runID, upstrea
 		"request": map[string]any{
 			"method":        method,
 			"ingress_path":  ingressPath,
+			"raw_query":     rawQuery,
 			"proxy_route":   proxyRoute,
+			"upstream_host": upstream,
 			"upstream_path": upstreamPath,
 			"body":          body,
 		},
 	}
-	_ = upstream
 	p.writeMantleObservation(sessionID, entry)
 }
 
