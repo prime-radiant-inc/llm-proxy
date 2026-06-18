@@ -20,9 +20,23 @@ type ResolveContext struct {
 	ProviderURL string `json:"provider_url"`
 }
 
+type ResolveResult struct {
+	Token        string
+	ClientFPHash string
+	Project      string
+	RunID        string
+}
+
+type resolverStdout struct {
+	Token        string `json:"token"`
+	ClientFPHash string `json:"client_fp_hash"`
+	Project      string `json:"project"`
+	RunID        string `json:"run_id"`
+}
+
 type cacheEntry struct {
-	resolvedKey string
-	expires     time.Time
+	resolved ResolveResult
+	expires  time.Time
 }
 
 type APITokenSubstituter struct {
@@ -85,7 +99,7 @@ func cacheKey(rc ResolveContext) string {
 	return rc.Provider + "\x00" + rc.ProviderURL + "\x00" + rc.APIToken
 }
 
-func (s *APITokenSubstituter) cacheGet(k string) (string, bool) {
+func (s *APITokenSubstituter) cacheGet(k string) (ResolveResult, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.cache[k]
@@ -93,12 +107,12 @@ func (s *APITokenSubstituter) cacheGet(k string) (string, bool) {
 		if ok {
 			delete(s.cache, k)
 		}
-		return "", false
+		return ResolveResult{}, false
 	}
-	return e.resolvedKey, true
+	return e.resolved, true
 }
 
-func (s *APITokenSubstituter) cachePut(k, v string) {
+func (s *APITokenSubstituter) cachePut(k string, resolved ResolveResult) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.cache) >= s.maxSize {
@@ -107,19 +121,19 @@ func (s *APITokenSubstituter) cachePut(k, v string) {
 			break
 		}
 	}
-	s.cache[k] = cacheEntry{resolvedKey: v, expires: time.Now().Add(s.ttl)}
+	s.cache[k] = cacheEntry{resolved: resolved, expires: time.Now().Add(s.ttl)}
 }
 
-// Resolve returns (realKey, httpStatus, err).
+// Resolve returns (resolved, httpStatus, err).
 // httpStatus == 0 means success.
 // httpStatus == 401: invalid provider_url, or resolver exited non-zero.
 // httpStatus == 502: transient failure (timeout, spawn failure, command-not-found, or exit 0 with empty stdout).
 //
 // Concurrent calls for the same uncached key each invoke the resolver independently
 // (no singleflight deduplication) — acceptable for a local resolver in v1.
-func (s *APITokenSubstituter) Resolve(ctx context.Context, rc ResolveContext) (string, int, error) {
+func (s *APITokenSubstituter) Resolve(ctx context.Context, rc ResolveContext) (ResolveResult, int, error) {
 	if !providerURLRe.MatchString(rc.ProviderURL) {
-		return "", 401, errors.New("invalid provider_url")
+		return ResolveResult{}, 401, errors.New("invalid provider_url")
 	}
 	k := cacheKey(rc)
 	if v, ok := s.cacheGet(k); ok {
@@ -128,7 +142,7 @@ func (s *APITokenSubstituter) Resolve(ctx context.Context, rc ResolveContext) (s
 
 	payload, err := json.Marshal(rc)
 	if err != nil {
-		return "", 502, err
+		return ResolveResult{}, 502, err
 	}
 	cctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -142,19 +156,34 @@ func (s *APITokenSubstituter) Resolve(ctx context.Context, rc ResolveContext) (s
 	runErr := cmd.Run()
 
 	if cctx.Err() == context.DeadlineExceeded {
-		return "", 502, cctx.Err()
+		return ResolveResult{}, 502, cctx.Err()
 	}
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
-			return "", 401, fmt.Errorf("resolver failed: %w: %s", runErr, strings.TrimSpace(errW.buf.String()))
+			return ResolveResult{}, 401, fmt.Errorf("resolver failed: %w: %s", runErr, strings.TrimSpace(errW.buf.String()))
 		}
-		return "", 502, fmt.Errorf("resolver failed: %w: %s", runErr, strings.TrimSpace(errW.buf.String()))
+		return ResolveResult{}, 502, fmt.Errorf("resolver failed: %w: %s", runErr, strings.TrimSpace(errW.buf.String()))
 	}
-	key := strings.TrimSpace(outW.buf.String())
-	if key == "" {
-		return "", 502, errors.New("resolver returned empty key")
+	raw := strings.TrimSpace(outW.buf.String())
+	if raw == "" {
+		return ResolveResult{}, 502, errors.New("resolver returned empty key")
 	}
-	s.cachePut(k, key)
-	return key, 0, nil
+
+	resolved := ResolveResult{Token: raw}
+	var parsed resolverStdout
+	if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
+		if parsed.Token == "" {
+			return ResolveResult{}, 502, errors.New("resolver returned json without token")
+		}
+		resolved = ResolveResult{
+			Token:        parsed.Token,
+			ClientFPHash: parsed.ClientFPHash,
+			Project:      parsed.Project,
+			RunID:        parsed.RunID,
+		}
+	}
+
+	s.cachePut(k, resolved)
+	return resolved, 0, nil
 }

@@ -69,7 +69,7 @@ func (p *Proxy) serveMantle(w http.ResponseWriter, r *http.Request) {
 	// Resolve the client's opaque nonce to a real short-lived Bearer key.
 	// Fail closed: no upstream call on resolution failure.
 	nonce, _ := readClientToken(r.Header)
-	realKey, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
+	resolved, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
 		APIToken:    nonce,
 		ClientHost:  r.RemoteAddr,
 		Provider:    "openai",
@@ -94,7 +94,7 @@ func (p *Proxy) serveMantle(w http.ResponseWriter, r *http.Request) {
 	if accept := r.Header.Get("Accept"); accept != "" {
 		proxyReq.Header.Set("Accept", accept)
 	}
-	proxyReq.Header.Set("Authorization", "Bearer "+realKey)
+	proxyReq.Header.Set("Authorization", "Bearer "+resolved.Token)
 
 	resp, err := p.bedrock.client.Do(proxyReq)
 	if err != nil {

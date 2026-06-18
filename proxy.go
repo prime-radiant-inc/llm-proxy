@@ -344,7 +344,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// auth header. Runs on every endpoint, before any logging, fail-closed (no upstream on failure).
 	if p.tokenSub != nil {
 		token, hdrName := readClientToken(r.Header)
-		realKey, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
+		resolved, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
 			APIToken:    token,
 			ClientHost:  r.RemoteAddr,
 			Provider:    provider,
@@ -354,7 +354,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "api token substitution failed", status)
 			return
 		}
-		setResolvedKey(proxyReq.Header, hdrName, realKey)
+		setResolvedKey(proxyReq.Header, hdrName, resolved.Token)
 	}
 
 	// Determine session ID and sequence for logging (conversation endpoints only)

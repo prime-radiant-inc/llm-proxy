@@ -286,7 +286,7 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 	// Resolve the client's opaque nonce to a real short-lived Bedrock Bearer key.
 	// Fail closed: no upstream call on resolution failure.
 	nonce, _ := readClientToken(r.Header)
-	realKey, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
+	resolved, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
 		APIToken:    nonce,
 		ClientHost:  r.RemoteAddr,
 		Provider:    provider,
@@ -296,7 +296,7 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "api token substitution failed", status)
 		return
 	}
-	proxyReq.Header.Set("Authorization", "Bearer "+realKey)
+	proxyReq.Header.Set("Authorization", "Bearer "+resolved.Token)
 
 	// Send to Bedrock
 	resp, err := p.bedrock.client.Do(proxyReq)

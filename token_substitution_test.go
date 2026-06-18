@@ -34,14 +34,14 @@ func TestResolveSuccessReadsStdinContext(t *testing.T) {
 	ctxFile := filepath.Join(t.TempDir(), "ctx.json")
 	cmd := writeScript(t, `cat > `+ctxFile+`; echo the-real-key`)
 	s := newSub(t, cmd)
-	key, status, err := s.Resolve(context.Background(), ResolveContext{
+	resolved, status, err := s.Resolve(context.Background(), ResolveContext{
 		APIToken: "nonce123", ClientHost: "10.0.100.2:5", Provider: "anthropic", ProviderURL: "api.anthropic.com",
 	})
 	if err != nil || status != 0 {
 		t.Fatalf("status=%d err=%v", status, err)
 	}
-	if key != "the-real-key" {
-		t.Fatalf("key=%q", key)
+	if resolved.Token != "the-real-key" {
+		t.Fatalf("key=%q", resolved.Token)
 	}
 	got, err := os.ReadFile(ctxFile)
 	if err != nil {
@@ -56,6 +56,89 @@ func TestResolveSuccessReadsStdinContext(t *testing.T) {
 	}
 	if !strings.Contains(gotStr, `"provider_url":"api.anthropic.com"`) {
 		t.Fatalf("ctx.json missing provider_url field: %s", gotStr)
+	}
+}
+
+func TestAPITokenSubstituterAcceptsResolverJSONMetadata(t *testing.T) {
+	s := newSub(t, writeScript(t, `echo '{"token":"real-bearer","client_fp_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","project":"proj","run_id":"run-test"}'`))
+
+	resolved, status, err := s.Resolve(context.Background(), ResolveContext{
+		APIToken: "nonce123", Provider: "anthropic", ProviderURL: "api.anthropic.com",
+	})
+	if err != nil || status != 0 {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	if resolved.Token != "real-bearer" {
+		t.Fatalf("token=%q", resolved.Token)
+	}
+	if resolved.ClientFPHash != strings.Repeat("a", 64) {
+		t.Fatalf("client_fp_hash=%q", resolved.ClientFPHash)
+	}
+	if resolved.Project != "proj" {
+		t.Fatalf("project=%q", resolved.Project)
+	}
+	if resolved.RunID != "run-test" {
+		t.Fatalf("run_id=%q", resolved.RunID)
+	}
+}
+
+func TestAPITokenSubstituterStillAcceptsBareToken(t *testing.T) {
+	s := newSub(t, writeScript(t, `echo real-bearer`))
+
+	resolved, status, err := s.Resolve(context.Background(), ResolveContext{
+		APIToken: "nonce123", Provider: "anthropic", ProviderURL: "api.anthropic.com",
+	})
+	if err != nil || status != 0 {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	if resolved.Token != "real-bearer" {
+		t.Fatalf("token=%q", resolved.Token)
+	}
+	if resolved.ClientFPHash != "" || resolved.Project != "" || resolved.RunID != "" {
+		t.Fatalf("unexpected metadata: %+v", resolved)
+	}
+}
+
+func TestAPITokenSubstituterRejectsJSONWithoutToken(t *testing.T) {
+	s := newSub(t, writeScript(t, `echo '{"client_fp_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","project":"proj","run_id":"run-test"}'`))
+
+	_, status, err := s.Resolve(context.Background(), ResolveContext{
+		APIToken: "nonce123", Provider: "anthropic", ProviderURL: "api.anthropic.com",
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if status != 502 {
+		t.Fatalf("status=%d, want 502", status)
+	}
+}
+
+func TestAPITokenSubstituterCachesMetadataWithToken(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), "calls")
+	s := newSub(t, writeScript(t, `echo x >> `+counter+`; echo '{"token":"real-bearer","client_fp_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","project":"proj","run_id":"run-test"}'`))
+	rc := ResolveContext{APIToken: "nonce123", Provider: "anthropic", ProviderURL: "api.anthropic.com"}
+
+	first, status, err := s.Resolve(context.Background(), rc)
+	if err != nil || status != 0 {
+		t.Fatalf("first resolve status=%d err=%v", status, err)
+	}
+	second, status, err := s.Resolve(context.Background(), rc)
+	if err != nil || status != 0 {
+		t.Fatalf("second resolve status=%d err=%v", status, err)
+	}
+	if first != second {
+		t.Fatalf("cached result mismatch: first=%+v second=%+v", first, second)
+	}
+	if second.ClientFPHash != strings.Repeat("a", 64) || second.Project != "proj" || second.RunID != "run-test" {
+		t.Fatalf("cached metadata missing: %+v", second)
+	}
+
+	b, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatalf("reading counter: %v", err)
+	}
+	if got := strings.Count(string(b), "x"); got != 1 {
+		t.Fatalf("resolver ran %d times, want 1 (cache hit should preserve metadata)", got)
 	}
 }
 
