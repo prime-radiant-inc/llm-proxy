@@ -100,16 +100,46 @@ func TestAPITokenSubstituterStillAcceptsBareToken(t *testing.T) {
 }
 
 func TestAPITokenSubstituterRejectsJSONWithoutToken(t *testing.T) {
-	s := newSub(t, writeScript(t, `echo '{"client_fp_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","project":"proj","run_id":"run-test"}'`))
-
-	_, status, err := s.Resolve(context.Background(), ResolveContext{
-		APIToken: "nonce123", Provider: "anthropic", ProviderURL: "api.anthropic.com",
-	})
-	if err == nil {
-		t.Fatal("expected error")
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{
+			name:   "object",
+			output: `{"client_fp_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","project":"proj","run_id":"run-test"}`,
+		},
+		{
+			name:   "string",
+			output: `"real-bearer"`,
+		},
+		{
+			name:   "number",
+			output: `123`,
+		},
+		{
+			name:   "bool",
+			output: `true`,
+		},
+		{
+			name:   "array",
+			output: `[]`,
+		},
 	}
-	if status != 502 {
-		t.Fatalf("status=%d, want 502", status)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newSub(t, writeScript(t, `printf '%s\n' '`+tt.output+`'`))
+
+			_, status, err := s.Resolve(context.Background(), ResolveContext{
+				APIToken: "nonce123", Provider: "anthropic", ProviderURL: "api.anthropic.com",
+			})
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if status != 502 {
+				t.Fatalf("status=%d, want 502", status)
+			}
+		})
 	}
 }
 

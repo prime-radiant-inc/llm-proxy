@@ -171,19 +171,32 @@ func (s *APITokenSubstituter) Resolve(ctx context.Context, rc ResolveContext) (R
 	}
 
 	resolved := ResolveResult{Token: raw}
-	var parsed resolverStdout
-	if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
-		if parsed.Token == "" {
+	if json.Valid([]byte(raw)) {
+		var parsedAny any
+		if err := json.Unmarshal([]byte(raw), &parsedAny); err != nil {
+			return ResolveResult{}, 502, err
+		}
+		obj, ok := parsedAny.(map[string]any)
+		if !ok {
+			return ResolveResult{}, 502, errors.New("resolver returned json without token")
+		}
+		token, ok := obj["token"].(string)
+		if !ok || token == "" {
 			return ResolveResult{}, 502, errors.New("resolver returned json without token")
 		}
 		resolved = ResolveResult{
-			Token:        parsed.Token,
-			ClientFPHash: parsed.ClientFPHash,
-			Project:      parsed.Project,
-			RunID:        parsed.RunID,
+			Token:        token,
+			ClientFPHash: stringField(obj, "client_fp_hash"),
+			Project:      stringField(obj, "project"),
+			RunID:        stringField(obj, "run_id"),
 		}
 	}
 
 	s.cachePut(k, resolved)
 	return resolved, 0, nil
+}
+
+func stringField(obj map[string]any, key string) string {
+	value, _ := obj[key].(string)
+	return value
 }
