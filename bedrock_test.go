@@ -636,6 +636,53 @@ func TestServeBedrock_SwapsNonceForRealBearer(t *testing.T) {
 	}
 }
 
+func TestServeBedrock_LogsResolverProvenanceToFile(t *testing.T) {
+	clientFPHash := strings.Repeat("a", 64)
+	responseBody := `{"id":"msg","type":"message","role":"assistant","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer REAL-BEARER" {
+			t.Errorf("upstream Authorization = %q, want real bearer", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(responseBody))
+	}))
+	defer mock.Close()
+
+	proxy.tokenSub = newSub(t, writeScript(t, `printf '%s\n' '{"token":"REAL-BEARER","client_fp_hash":"`+clientFPHash+`","project":"cb-v0d-canary","run_id":"friend-canary-provenance"}'`))
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	req := httptest.NewRequest("POST", "/model/us.anthropic.claude-sonnet-4-5-20250929-v2:0/invoke",
+		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+	proxy.serveBedrock(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", w.Code, w.Body.String())
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	for _, entryType := range []string{"request", "response"} {
+		entry := findLogEntryByType(t, entries, entryType)
+		meta, ok := entry["_meta"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s _meta missing or wrong type: %#v", entryType, entry)
+		}
+		assertMetaString(t, meta, "transport", "bedrock")
+		assertMetaString(t, meta, "model_override", "us.anthropic.claude-sonnet-4-5-20250929-v2:0")
+		assertMetaString(t, meta, "cloud_build_run_id", "friend-canary-provenance")
+		assertMetaString(t, meta, "client_fp_hash", clientFPHash)
+		assertMetaString(t, meta, "project", "cb-v0d-canary")
+		assertMetaString(t, meta, "provider_route", "aws-bedrock")
+		assertMetaString(t, meta, "wire_api", "messages")
+	}
+}
+
 func TestServeMantle_HappyPath(t *testing.T) {
 	var receivedPath, receivedAuth string
 	responseBody := `{"id":"resp_123","object":"response","output":[]}`
@@ -832,6 +879,24 @@ func TestServeMantle_ForwardsMethod(t *testing.T) {
 type providerCapture struct {
 	inner            ProxyLogger
 	capturedProvider *string
+}
+
+func findLogEntryByType(t *testing.T, entries []map[string]any, entryType string) map[string]any {
+	t.Helper()
+	for _, entry := range entries {
+		if got, _ := entry["type"].(string); got == entryType {
+			return entry
+		}
+	}
+	t.Fatalf("log entry type %q not found in %#v", entryType, entries)
+	return nil
+}
+
+func assertMetaString(t *testing.T, meta map[string]any, key, want string) {
+	t.Helper()
+	if got, _ := meta[key].(string); got != want {
+		t.Fatalf("_meta[%q] = %q, want %q; meta=%#v", key, got, want, meta)
+	}
 }
 
 func (pc *providerCapture) RegisterUpstream(sessionID, upstream string) {

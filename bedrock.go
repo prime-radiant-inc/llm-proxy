@@ -214,6 +214,20 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 	provider := "anthropic"
 	upstream := fmt.Sprintf("bedrock-runtime.%s.amazonaws.com", p.bedrock.region)
 
+	// Resolve the client's opaque nonce to a real short-lived Bedrock Bearer key.
+	// Fail closed: no upstream call on resolution failure.
+	nonce, _ := readClientToken(r.Header)
+	resolved, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
+		APIToken:    nonce,
+		ClientHost:  r.RemoteAddr,
+		Provider:    provider,
+		ProviderURL: upstream,
+	})
+	if status != 0 {
+		http.Error(w, "api token substitution failed", status)
+		return
+	}
+
 	// Session tracking and logging setup
 	var sessionID string
 	var seq int
@@ -226,11 +240,17 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 
 	if shouldLog {
 		requestID = uuid.New().String()
-
-		// Set Bedrock context for Loki transport/model labels on response entries
-		if mw, ok := p.logger.(*MultiWriter); ok {
-			mw.SetBedrockContext(requestID, modelID)
-			defer mw.ClearBedrockContext(requestID)
+		if logger, ok := p.logger.(requestLogContextLogger); ok {
+			logger.SetRequestLogContext(requestID, RequestLogContext{
+				Transport:       "bedrock",
+				ModelOverride:   modelID,
+				CloudBuildRunID: resolved.RunID,
+				ClientFPHash:    resolved.ClientFPHash,
+				Project:         resolved.Project,
+				ProviderRoute:   "aws-bedrock",
+				WireAPI:         "messages",
+			})
+			defer logger.ClearRequestLogContext(requestID)
 		}
 
 		if p.sessionManager != nil {
@@ -281,20 +301,6 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 	}
 	if accept := r.Header.Get("Accept"); accept != "" {
 		proxyReq.Header.Set("Accept", accept)
-	}
-
-	// Resolve the client's opaque nonce to a real short-lived Bedrock Bearer key.
-	// Fail closed: no upstream call on resolution failure.
-	nonce, _ := readClientToken(r.Header)
-	resolved, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
-		APIToken:    nonce,
-		ClientHost:  r.RemoteAddr,
-		Provider:    provider,
-		ProviderURL: upstream,
-	})
-	if status != 0 {
-		http.Error(w, "api token substitution failed", status)
-		return
 	}
 	proxyReq.Header.Set("Authorization", "Bearer "+resolved.Token)
 

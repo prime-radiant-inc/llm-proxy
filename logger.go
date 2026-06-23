@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -23,12 +24,28 @@ type StreamChunk struct {
 	Raw       string    `json:"raw"`
 }
 
+type RequestLogContext struct {
+	Transport       string
+	ModelOverride   string
+	CloudBuildRunID string
+	ClientFPHash    string
+	Project         string
+	ProviderRoute   string
+	WireAPI         string
+}
+
+type requestLogContextLogger interface {
+	SetRequestLogContext(requestID string, ctx RequestLogContext)
+	ClearRequestLogContext(requestID string)
+}
+
 type Logger struct {
 	baseDir   string
 	machineID string // user@hostname for log aggregation
 	mu        sync.Mutex
 	files     map[string]*os.File
 	upstreams map[string]string // sessionID -> upstream
+	contexts  sync.Map          // requestID -> RequestLogContext
 }
 
 func getMachineID() string {
@@ -134,6 +151,47 @@ func (l *Logger) RegisterUpstream(sessionID, upstream string) {
 	l.mu.Unlock()
 }
 
+func (l *Logger) SetRequestLogContext(requestID string, ctx RequestLogContext) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return
+	}
+	l.contexts.Store(requestID, ctx)
+}
+
+func (l *Logger) ClearRequestLogContext(requestID string) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return
+	}
+	l.contexts.Delete(requestID)
+}
+
+func (l *Logger) addRequestLogContext(meta map[string]interface{}, requestID string) {
+	if ctx, ok := l.contexts.Load(strings.TrimSpace(requestID)); ok {
+		if requestCtx, ok := ctx.(RequestLogContext); ok {
+			addRequestLogContextMeta(meta, requestCtx)
+		}
+	}
+}
+
+func addRequestLogContextMeta(meta map[string]interface{}, ctx RequestLogContext) {
+	addMetaString(meta, "transport", ctx.Transport)
+	addMetaString(meta, "model_override", ctx.ModelOverride)
+	addMetaString(meta, "cloud_build_run_id", ctx.CloudBuildRunID)
+	addMetaString(meta, "client_fp_hash", ctx.ClientFPHash)
+	addMetaString(meta, "project", ctx.Project)
+	addMetaString(meta, "provider_route", ctx.ProviderRoute)
+	addMetaString(meta, "wire_api", ctx.WireAPI)
+}
+
+func addMetaString(meta map[string]interface{}, key, value string) {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		meta[key] = value
+	}
+}
+
 func (l *Logger) LogSessionStart(sessionID, provider, upstream string) error {
 	// Register the upstream for this session
 	l.RegisterUpstream(sessionID, upstream)
@@ -154,6 +212,14 @@ func (l *Logger) LogSessionStart(sessionID, provider, upstream string) error {
 
 func (l *Logger) LogRequest(sessionID, provider string, seq int, method, path string, headers http.Header, body []byte, requestID string) error {
 	upstream := l.upstreams[sessionID]
+	meta := map[string]interface{}{
+		"ts":         time.Now().UTC().Format(time.RFC3339Nano),
+		"machine":    l.machineID,
+		"host":       upstream,
+		"session":    sessionID,
+		"request_id": requestID,
+	}
+	l.addRequestLogContext(meta, requestID)
 
 	entry := map[string]interface{}{
 		"type":    "request",
@@ -163,19 +229,21 @@ func (l *Logger) LogRequest(sessionID, provider string, seq int, method, path st
 		"headers": ObfuscateHeaders(headers),
 		"body":    string(body),
 		"size":    len(body),
-		"_meta": map[string]interface{}{
-			"ts":         time.Now().UTC().Format(time.RFC3339Nano),
-			"machine":    l.machineID,
-			"host":       upstream,
-			"session":    sessionID,
-			"request_id": requestID,
-		},
+		"_meta":   meta,
 	}
 	return l.writeEntry(sessionID, entry)
 }
 
 func (l *Logger) LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string) error {
 	upstream := l.upstreams[sessionID]
+	meta := map[string]interface{}{
+		"ts":         time.Now().UTC().Format(time.RFC3339Nano),
+		"machine":    l.machineID,
+		"host":       upstream,
+		"session":    sessionID,
+		"request_id": requestID,
+	}
+	l.addRequestLogContext(meta, requestID)
 
 	entry := map[string]interface{}{
 		"type":    "response",
@@ -184,13 +252,7 @@ func (l *Logger) LogResponse(sessionID, provider string, seq int, status int, he
 		"headers": headers,
 		"timing":  timing,
 		"size":    len(body),
-		"_meta": map[string]interface{}{
-			"ts":         time.Now().UTC().Format(time.RFC3339Nano),
-			"machine":    l.machineID,
-			"host":       upstream,
-			"session":    sessionID,
-			"request_id": requestID,
-		},
+		"_meta":   meta,
 	}
 
 	if chunks != nil {
