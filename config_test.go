@@ -32,6 +32,9 @@ log_dir = "/var/log/llm-proxy"
 	if cfg.LogDir != "/var/log/llm-proxy" {
 		t.Errorf("expected log dir '/var/log/llm-proxy', got %q", cfg.LogDir)
 	}
+	if !cfg.LogDirConfigured {
+		t.Error("expected TOML log_dir to mark LogDirConfigured")
+	}
 }
 
 func TestLoadConfigFromTOMLWithDefaults(t *testing.T) {
@@ -46,6 +49,22 @@ func TestLoadConfigFromTOMLWithDefaults(t *testing.T) {
 	}
 	if cfg.LogDir != "./logs" {
 		t.Errorf("expected default log dir './logs', got %q", cfg.LogDir)
+	}
+	if cfg.LogDirConfigured {
+		t.Error("expected omitted TOML log_dir to leave LogDirConfigured false")
+	}
+}
+
+func TestLoadConfigFromEnv_LogDirConfigured(t *testing.T) {
+	t.Setenv("LLM_PROXY_LOG_DIR", "/env/logs")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	if cfg.LogDir != "/env/logs" {
+		t.Errorf("expected env log dir '/env/logs', got %q", cfg.LogDir)
+	}
+	if !cfg.LogDirConfigured {
+		t.Error("expected env log dir to mark LogDirConfigured")
 	}
 }
 

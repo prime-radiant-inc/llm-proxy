@@ -40,6 +40,7 @@ type APITokenSubstitutionConfig struct {
 type Config struct {
 	Port                         int                        `toml:"port"`
 	LogDir                       string                     `toml:"log_dir"`
+	LogDirConfigured             bool                       `toml:"-"`
 	BedrockRegion                string                     `toml:"bedrock_region"` // AWS region for Bedrock (empty = disabled)
 	MantleRequireCloudBuildRunID bool                       `toml:"mantle_require_cloud_build_run_id"`
 	ServiceMode                  bool                       `toml:"-"` // CLI-only, not persisted in config file
@@ -82,6 +83,13 @@ func LoadConfigFromTOML(data []byte) (Config, error) {
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
+	var raw map[string]any
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return Config{}, err
+	}
+	if _, ok := raw["log_dir"]; ok {
+		cfg.LogDirConfigured = true
+	}
 	return cfg, nil
 }
 
@@ -105,6 +113,7 @@ func LoadConfigFromEnv(cfg Config) Config {
 	}
 	if logDir := os.Getenv("LLM_PROXY_LOG_DIR"); logDir != "" {
 		cfg.LogDir = logDir
+		cfg.LogDirConfigured = true
 	}
 	if region := os.Getenv("BEDROCK_REGION"); region != "" {
 		cfg.BedrockRegion = region

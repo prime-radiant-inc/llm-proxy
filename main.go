@@ -54,12 +54,16 @@ func ParseCLIFlags(args []string) (CLIFlags, error) {
 	return flags, nil
 }
 
-// applyRuntimeDefaults applies post-merge defaulting that depends on whether
-// flags were explicitly passed. Run after MergeConfig and before NewServer.
+// applyRuntimeDefaults applies post-merge defaulting for values that should not
+// be persisted as static defaults. Run after MergeConfig and before NewServer.
 func applyRuntimeDefaults(cfg Config, flags CLIFlags) Config {
-	// Default log dir to ~/.llm-provider-logs/ unless --log-dir was passed.
+	if flags.LogDir != "" {
+		cfg.LogDirConfigured = true
+	}
+
+	// Default log dir to ~/.llm-provider-logs/ unless a config layer provided one.
 	// Both service and non-service modes share this default.
-	if flags.LogDir == "" {
+	if !cfg.LogDirConfigured {
 		home, _ := os.UserHomeDir()
 		cfg.LogDir = filepath.Join(home, ".llm-provider-logs")
 	}
@@ -79,6 +83,7 @@ func MergeConfig(cfg Config, flags CLIFlags) Config {
 	}
 	if flags.LogDir != "" {
 		cfg.LogDir = flags.LogDir
+		cfg.LogDirConfigured = true
 	}
 	if flags.ServiceMode {
 		cfg.ServiceMode = true
@@ -205,8 +210,8 @@ func main() {
 	if cfg.Explore {
 		home, _ := os.UserHomeDir()
 		logDir := cfg.LogDir
-		// Only default to ~/.llm-provider-logs if --log-dir wasn't explicitly set
-		if flags.LogDir == "" {
+		// Only default to ~/.llm-provider-logs if no config layer set log_dir.
+		if !cfg.LogDirConfigured {
 			logDir = filepath.Join(home, ".llm-provider-logs")
 		}
 

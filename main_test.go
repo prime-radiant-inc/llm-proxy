@@ -98,6 +98,13 @@ func TestApplyRuntimeDefaults(t *testing.T) {
 			wantPort:   12071,
 		},
 		{
+			name:       "configured log dir is preserved",
+			cfg:        Config{LogDir: "/var/lib/llm-proxy/provider-logs", LogDirConfigured: true, Port: 0},
+			flags:      CLIFlags{},
+			wantLogDir: "/var/lib/llm-proxy/provider-logs",
+			wantPort:   12071,
+		},
+		{
 			name:       "explicit --port is preserved",
 			cfg:        Config{LogDir: "./logs", Port: 9000},
 			flags:      CLIFlags{},
