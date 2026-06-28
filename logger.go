@@ -25,13 +25,15 @@ type StreamChunk struct {
 }
 
 type RequestLogContext struct {
-	Transport       string
-	ModelOverride   string
-	CloudBuildRunID string
-	ClientFPHash    string
-	Project         string
-	ProviderRoute   string
-	WireAPI         string
+	Transport     string
+	ModelOverride string
+	RunID         string
+	ResolvedRunID string
+	LegacyRunID   string
+	ClientFPHash  string
+	Project       string
+	ProviderRoute string
+	WireAPI       string
 }
 
 type requestLogContextLogger interface {
@@ -178,7 +180,9 @@ func (l *Logger) addRequestLogContext(meta map[string]interface{}, requestID str
 func addRequestLogContextMeta(meta map[string]interface{}, ctx RequestLogContext) {
 	addMetaString(meta, "transport", ctx.Transport)
 	addMetaString(meta, "model_override", ctx.ModelOverride)
-	addMetaString(meta, "cloud_build_run_id", ctx.CloudBuildRunID)
+	addMetaString(meta, "run_id", ctx.RunID)
+	addMetaString(meta, "resolved_run_id", ctx.ResolvedRunID)
+	addMetaString(meta, "cloud_build_run_id", ctx.LegacyRunID)
 	addMetaString(meta, "client_fp_hash", ctx.ClientFPHash)
 	addMetaString(meta, "project", ctx.Project)
 	addMetaString(meta, "provider_route", ctx.ProviderRoute)

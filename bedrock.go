@@ -242,13 +242,13 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 		requestID = uuid.New().String()
 		if logger, ok := p.logger.(requestLogContextLogger); ok {
 			logger.SetRequestLogContext(requestID, RequestLogContext{
-				Transport:       "bedrock",
-				ModelOverride:   modelID,
-				CloudBuildRunID: resolved.RunID,
-				ClientFPHash:    resolved.ClientFPHash,
-				Project:         resolved.Project,
-				ProviderRoute:   "aws-bedrock",
-				WireAPI:         "messages",
+				Transport:     "bedrock",
+				ModelOverride: modelID,
+				LegacyRunID:   resolved.RunID,
+				ClientFPHash:  resolved.ClientFPHash,
+				Project:       resolved.Project,
+				ProviderRoute: "aws-bedrock",
+				WireAPI:       "messages",
 			})
 			defer logger.ClearRequestLogContext(requestID)
 		}

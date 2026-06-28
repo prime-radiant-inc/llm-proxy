@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -266,6 +267,44 @@ func TestMultiWriter_LogRequest_BothCalled(t *testing.T) {
 		if call.entry["type"] != "request" {
 			t.Errorf("Loki entry has wrong type: got %v, want request", call.entry["type"])
 		}
+	}
+}
+
+func TestMultiWriter_LogRequest_WritesNeutralRunMetadata(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+
+	requestID := "req-neutral"
+	mw.SetRequestLogContext(requestID, RequestLogContext{
+		RunID:         "proj-20260628-run",
+		ResolvedRunID: "stale-box-id",
+		ClientFPHash:  strings.Repeat("a", 64),
+		Project:       "proj",
+		ProviderRoute: "aws-bedrock",
+		WireAPI:       "messages",
+	})
+
+	err := mw.LogRequest("session-1", "anthropic", 1, "POST", "/v1/messages", http.Header{}, []byte(`{"ok":true}`), requestID)
+	if err != nil {
+		t.Fatalf("LogRequest returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	meta, ok := lokiExporter.pushCalls[0].entry["_meta"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("_meta missing or wrong type: %#v", lokiExporter.pushCalls[0].entry)
+	}
+	if got := meta["run_id"]; got != "proj-20260628-run" {
+		t.Fatalf("run_id = %v, want proj-20260628-run", got)
+	}
+	if got := meta["resolved_run_id"]; got != "stale-box-id" {
+		t.Fatalf("resolved_run_id = %v, want stale-box-id", got)
+	}
+	if _, ok := meta["cloud_build_run_id"]; ok {
+		t.Fatalf("cloud_build_run_id unexpectedly present in neutral context: %#v", meta)
 	}
 }
 

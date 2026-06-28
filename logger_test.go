@@ -264,3 +264,42 @@ func TestLoggerLogObservation(t *testing.T) {
 		t.Fatalf("_meta.wire_api = %v, want openai-responses", got)
 	}
 }
+
+func TestRequestLogContextWritesNeutralRunMetadata(t *testing.T) {
+	meta := map[string]interface{}{}
+	addRequestLogContextMeta(meta, RequestLogContext{
+		RunID:         "proj-20260628-run",
+		ResolvedRunID: "stale-box-id",
+		ClientFPHash:  strings.Repeat("a", 64),
+		Project:       "proj",
+		ProviderRoute: "aws-bedrock",
+		WireAPI:       "messages",
+	})
+
+	if got := meta["run_id"]; got != "proj-20260628-run" {
+		t.Fatalf("run_id = %v, want proj-20260628-run", got)
+	}
+	if got := meta["resolved_run_id"]; got != "stale-box-id" {
+		t.Fatalf("resolved_run_id = %v, want stale-box-id", got)
+	}
+	if _, ok := meta["cloud_build_run_id"]; ok {
+		t.Fatalf("legacy cloud_build_run_id present in neutral context: %#v", meta)
+	}
+}
+
+func TestRequestLogContextWritesLegacyRunMetadata(t *testing.T) {
+	meta := map[string]interface{}{}
+	addRequestLogContextMeta(meta, RequestLogContext{
+		LegacyRunID: "legacy-run",
+	})
+
+	if got := meta["cloud_build_run_id"]; got != "legacy-run" {
+		t.Fatalf("cloud_build_run_id = %v, want legacy-run", got)
+	}
+	if _, ok := meta["run_id"]; ok {
+		t.Fatalf("run_id unexpectedly present in legacy context: %#v", meta)
+	}
+	if _, ok := meta["resolved_run_id"]; ok {
+		t.Fatalf("resolved_run_id unexpectedly present in legacy context: %#v", meta)
+	}
+}
