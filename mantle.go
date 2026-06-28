@@ -30,10 +30,23 @@ const (
 // to /openai/v1/responses, and emits telemetry-contract-v0 observations for
 // Cloud Build replay.
 func (p *Proxy) serveMantle(w http.ResponseWriter, r *http.Request) {
-	p.serveMantleForPath(w, r, "", r.URL.Path)
+	p.serveMantleForPathWithAttribution(w, r, mantleAttribution{}, r.URL.Path)
 }
 
-func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requiredRunID, mantlePath string) {
+type mantleAttribution struct {
+	RunID       string
+	LegacyRoute bool
+}
+
+func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, runID, mantlePath string) {
+	p.serveMantleForPathWithAttribution(w, r, mantleAttribution{RunID: runID}, mantlePath)
+}
+
+func (p *Proxy) serveLegacyMantleForPath(w http.ResponseWriter, r *http.Request, runID, mantlePath string) {
+	p.serveMantleForPathWithAttribution(w, r, mantleAttribution{RunID: runID, LegacyRoute: true}, mantlePath)
+}
+
+func (p *Proxy) serveMantleForPathWithAttribution(w http.ResponseWriter, r *http.Request, attribution mantleAttribution, mantlePath string) {
 	if p.bedrock == nil {
 		http.Error(w, "Bedrock not configured", http.StatusServiceUnavailable)
 		return
@@ -96,21 +109,21 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 		ProviderURL: upstream,
 	})
 	if status != 0 {
-		p.logMantlePreUpstreamError(sessionID, requestID, requiredRunID, "", mantleRequestModel(reqBody), "token_substitution_failed", "api token substitution failed", status)
+		p.logMantlePreUpstreamError(sessionID, requestID, attribution, "", mantleRequestModel(reqBody), "token_substitution_failed", "api token substitution failed", status)
 		http.Error(w, "api token substitution failed", status)
 		return
 	}
-	if requiredRunID != "" && resolved.RunID != "" && resolved.RunID != requiredRunID {
-		p.logMantlePreUpstreamError(sessionID, requestID, requiredRunID, "", mantleRequestModel(reqBody), "unresolved_run_id", "unresolved cloud build run id", http.StatusForbidden)
+	if attribution.LegacyRoute && attribution.RunID != "" && resolved.RunID != "" && resolved.RunID != attribution.RunID {
+		p.logMantlePreUpstreamError(sessionID, requestID, attribution, "", mantleRequestModel(reqBody), "unresolved_run_id", "unresolved cloud build run id", http.StatusForbidden)
 		http.Error(w, "unresolved cloud build run id", http.StatusForbidden)
 		return
 	}
 
-	p.logMantleRequestObservation(sessionID, requestID, requiredRunID, upstream, r.Method, r.URL.Path, r.URL.RawQuery, mantlePath, targetPath, reqBody)
+	p.logMantleRequestObservation(sessionID, requestID, attribution, upstream, r.Method, r.URL.Path, r.URL.RawQuery, mantlePath, targetPath, reqBody)
 
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(reqBody))
 	if err != nil {
-		p.logMantleTerminalErrorObservation(sessionID, requestID, requiredRunID, http.StatusInternalServerError, ResponseTiming{}, "request_create_failed", "failed to create upstream request", reqBody, nil)
+		p.logMantleTerminalErrorObservation(sessionID, requestID, attribution, http.StatusInternalServerError, ResponseTiming{}, "request_create_failed", "failed to create upstream request", reqBody, nil)
 		http.Error(w, "failed to create request", http.StatusInternalServerError)
 		return
 	}
@@ -128,7 +141,7 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 	startTime := time.Now()
 	resp, err := p.bedrock.client.Do(proxyReq)
 	if err != nil {
-		p.logMantleTerminalErrorObservation(sessionID, requestID, requiredRunID, http.StatusBadGateway, ResponseTiming{
+		p.logMantleTerminalErrorObservation(sessionID, requestID, attribution, http.StatusBadGateway, ResponseTiming{
 			TotalMs: time.Since(startTime).Milliseconds(),
 		}, "upstream_request_failed", "upstream request failed", reqBody, nil)
 		http.Error(w, "upstream request failed: "+err.Error(), http.StatusBadGateway)
@@ -147,7 +160,7 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 			line, readErr := reader.ReadBytes('\n')
 			if len(line) > 0 {
 				if _, writeErr := sw.Write(line); writeErr != nil {
-					p.logMantleTerminalErrorObservation(sessionID, requestID, requiredRunID, resp.StatusCode, ResponseTiming{
+					p.logMantleTerminalErrorObservation(sessionID, requestID, attribution, resp.StatusCode, ResponseTiming{
 						TotalMs: time.Since(startTime).Milliseconds(),
 					}, "client_stream_write_failed", "client stream write failed", reqBody, sw.Chunks())
 					return
@@ -158,7 +171,7 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 				if readErr == io.EOF {
 					break
 				}
-				p.logMantleTerminalErrorObservation(sessionID, requestID, requiredRunID, resp.StatusCode, ResponseTiming{
+				p.logMantleTerminalErrorObservation(sessionID, requestID, attribution, resp.StatusCode, ResponseTiming{
 					TotalMs: time.Since(startTime).Milliseconds(),
 				}, "upstream_stream_read_failed", "upstream stream read failed", reqBody, sw.Chunks())
 				return
@@ -172,7 +185,7 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 		p.logMantleResponseObservation(
 			sessionID,
 			requestID,
-			requiredRunID,
+			attribution,
 			resp.StatusCode,
 			ResponseTiming{
 				TTFBMs:  ttfb,
@@ -197,7 +210,7 @@ func (p *Proxy) serveMantleForPath(w http.ResponseWriter, r *http.Request, requi
 	p.logMantleResponseObservation(
 		sessionID,
 		requestID,
-		requiredRunID,
+		attribution,
 		resp.StatusCode,
 		ResponseTiming{
 			TTFBMs:  ttfb.Milliseconds(),
@@ -307,15 +320,19 @@ func mantleResponseBodyFromStream(chunks []StreamChunk) any {
 	return nil
 }
 
-func (p *Proxy) newMantleMeta(sessionID, requestID, runID, model string) map[string]any {
+func (p *Proxy) newMantleMeta(sessionID, requestID string, attribution mantleAttribution, model string) map[string]any {
 	meta := map[string]any{
-		"schema_version":     "telemetry-contract-v0",
-		"ts":                 time.Now().UTC().Format(time.RFC3339Nano),
-		"request_id":         requestID,
-		"cloud_build_run_id": runID,
-		"provider":           mantleProvider,
-		"provider_route":     mantleProviderRoute,
-		"wire_api":           mantleWireAPI,
+		"schema_version": "telemetry-contract-v0",
+		"ts":             time.Now().UTC().Format(time.RFC3339Nano),
+		"request_id":     requestID,
+		"provider":       mantleProvider,
+		"provider_route": mantleProviderRoute,
+		"wire_api":       mantleWireAPI,
+	}
+	if attribution.LegacyRoute {
+		meta["cloud_build_run_id"] = attribution.RunID
+	} else if attribution.RunID != "" {
+		meta["run_id"] = attribution.RunID
 	}
 	if sessionID != "" {
 		meta["session"] = sessionID
@@ -339,11 +356,11 @@ func (p *Proxy) writeMantleObservation(sessionID string, entry map[string]any) {
 	_ = p.logger.LogObservation(sessionID, mantleProvider, entry)
 }
 
-func (p *Proxy) logMantlePreUpstreamError(sessionID, requestID, runID, rejectedRunID, model, class, message string, status int) {
+func (p *Proxy) logMantlePreUpstreamError(sessionID, requestID string, attribution mantleAttribution, rejectedRunID, model, class, message string, status int) {
 	entry := map[string]any{
 		"type":   "error",
 		"status": status,
-		"_meta":  p.newMantleMeta(sessionID, requestID, runID, model),
+		"_meta":  p.newMantleMeta(sessionID, requestID, attribution, model),
 		"error": map[string]any{
 			"class":   class,
 			"message": message,
@@ -355,12 +372,12 @@ func (p *Proxy) logMantlePreUpstreamError(sessionID, requestID, runID, rejectedR
 	p.writeMantleObservation(sessionID, entry)
 }
 
-func (p *Proxy) logMantleRequestObservation(sessionID, requestID, runID, upstream, method, ingressPath, rawQuery, proxyRoute, upstreamPath string, reqBody []byte) {
+func (p *Proxy) logMantleRequestObservation(sessionID, requestID string, attribution mantleAttribution, upstream, method, ingressPath, rawQuery, proxyRoute, upstreamPath string, reqBody []byte) {
 	body, _ := decodeObservationBody(reqBody)
 	model := mantleRequestModel(reqBody)
 	entry := map[string]any{
 		"type":  "request",
-		"_meta": p.newMantleMeta(sessionID, requestID, runID, model),
+		"_meta": p.newMantleMeta(sessionID, requestID, attribution, model),
 		"request": map[string]any{
 			"method":        method,
 			"ingress_path":  ingressPath,
@@ -374,7 +391,7 @@ func (p *Proxy) logMantleRequestObservation(sessionID, requestID, runID, upstrea
 	p.writeMantleObservation(sessionID, entry)
 }
 
-func (p *Proxy) logMantleResponseObservation(sessionID, requestID, runID string, status int, timing ResponseTiming, respBody []byte, chunks []StreamChunk, reqBody []byte) {
+func (p *Proxy) logMantleResponseObservation(sessionID, requestID string, attribution mantleAttribution, status int, timing ResponseTiming, respBody []byte, chunks []StreamChunk, reqBody []byte) {
 	model := mantleRequestModel(reqBody)
 	response := map[string]any{}
 	if len(chunks) > 0 {
@@ -390,19 +407,19 @@ func (p *Proxy) logMantleResponseObservation(sessionID, requestID, runID string,
 		"type":     "response",
 		"status":   status,
 		"timing":   timing,
-		"_meta":    p.newMantleMeta(sessionID, requestID, runID, model),
+		"_meta":    p.newMantleMeta(sessionID, requestID, attribution, model),
 		"response": response,
 	}
 	p.writeMantleObservation(sessionID, entry)
 }
 
-func (p *Proxy) logMantleTerminalErrorObservation(sessionID, requestID, runID string, status int, timing ResponseTiming, class, message string, reqBody []byte, chunks []StreamChunk) {
+func (p *Proxy) logMantleTerminalErrorObservation(sessionID, requestID string, attribution mantleAttribution, status int, timing ResponseTiming, class, message string, reqBody []byte, chunks []StreamChunk) {
 	model := mantleRequestModel(reqBody)
 	entry := map[string]any{
 		"type":   "error",
 		"status": status,
 		"timing": timing,
-		"_meta":  p.newMantleMeta(sessionID, requestID, runID, model),
+		"_meta":  p.newMantleMeta(sessionID, requestID, attribution, model),
 		"error": map[string]any{
 			"class":   class,
 			"message": message,

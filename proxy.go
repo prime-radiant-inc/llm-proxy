@@ -302,7 +302,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.logMantlePreUpstreamError(
 				p.generateSessionID(),
 				uuid.New().String(),
-				"",
+				mantleAttribution{},
 				rejectedRunID,
 				"",
 				class,
@@ -312,7 +312,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid cloud build mantle path", http.StatusBadRequest)
 			return
 		}
-		p.serveMantleForPath(w, r, requiredRunID, mantlePath)
+		p.serveLegacyMantleForPath(w, r, requiredRunID, mantlePath)
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/mantle/") {
@@ -535,6 +535,8 @@ func (p *Proxy) serveRunEnvelope(w http.ResponseWriter, r *http.Request, env Run
 		p.serveBedrockForPath(w, r, env.InnerPath, attr)
 	case env.InnerPath == "/inference-profiles":
 		p.serveBedrockDiscoveryForPath(w, r, env.InnerPath, attr)
+	case env.InnerPath == "/mantle/v1/responses":
+		p.serveMantleForPath(w, r, env.RunID, env.InnerPath)
 	default:
 		http.Error(w, "unknown run attribution route", http.StatusBadRequest)
 	}

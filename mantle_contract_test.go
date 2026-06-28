@@ -280,6 +280,80 @@ func TestServeMantleRejectsUnresolvedRunIDBeforeUpstream(t *testing.T) {
 	}
 }
 
+func TestServeMantleRunEnvelopeAllowsStaleResolverRunID(t *testing.T) {
+	var receivedPath string
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"resp","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer mock.Close()
+
+	counterSub, counter := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"stale-box"}`)
+	proxy.tokenSub = counterSub
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	req := httptest.NewRequest("POST", "/runs/run-test/mantle/v1/responses", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%s", w.Code, w.Body.String())
+	}
+	if readResolverCalls(t, counter) != 1 {
+		t.Fatalf("resolver calls = %d, want 1", readResolverCalls(t, counter))
+	}
+	if receivedPath != "/openai/v1/responses" {
+		t.Fatalf("upstream path = %q, want /openai/v1/responses", receivedPath)
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 2 {
+		t.Fatalf("log entries = %d, want 2", len(entries))
+	}
+	meta := findLogEntryByType(t, entries, "request")["_meta"].(map[string]any)
+	assertMetaString(t, meta, "run_id", "run-test")
+	if _, ok := meta["cloud_build_run_id"]; ok {
+		t.Fatalf("canonical mantle emitted legacy key: %#v", meta)
+	}
+}
+
+func TestServeMantleRunEnvelopeRejectsLegacyModelRouteBeforeResolver(t *testing.T) {
+	upstreamCalls := 0
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+	}))
+	defer mock.Close()
+
+	counterSub, counter := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"run-test"}`)
+	proxy.tokenSub = counterSub
+
+	req := httptest.NewRequest("POST", "/cbrun/run-test/model/anthropic.claude-3-haiku-20240307-v1:0/invoke", strings.NewReader(`{"input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400. body=%s", w.Code, w.Body.String())
+	}
+	if readResolverCalls(t, counter) != 0 {
+		t.Fatalf("resolver should not run for legacy /cbrun model route")
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", upstreamCalls)
+	}
+}
+
 func TestServeMantleLogsTokenSubstitutionFailureObservationWithoutSecrets(t *testing.T) {
 	upstreamCalls := 0
 	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
