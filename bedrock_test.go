@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -523,6 +524,139 @@ func TestServeHTTP_ExistingPathsUnchanged(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("existing path: status = %d, want 200", w.Code)
+	}
+}
+
+func TestServeHTTP_RunEnvelopeBedrockStripsPrefix(t *testing.T) {
+	var upstreamPath string
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"msg","type":"message","role":"assistant","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer mock.Close()
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+	proxy.tokenSub = newSub(t, writeScript(t, `printf '%s\n' '{"token":"REAL-BEARER","client_fp_hash":"`+strings.Repeat("a", 64)+`","project":"proj","run_id":"stale-box"}'`))
+
+	req := httptest.NewRequest("POST", "/runs/proj-run-1/model/anthropic.claude-3-haiku-20240307-v1:0/invoke",
+		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/model/anthropic.claude-3-haiku-20240307-v1:0/invoke" {
+		t.Fatalf("upstreamPath = %q", upstreamPath)
+	}
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	meta := findLogEntryByType(t, entries, "request")["_meta"].(map[string]any)
+	assertMetaString(t, meta, "run_id", "proj-run-1")
+	assertMetaString(t, meta, "resolved_run_id", "stale-box")
+	if _, ok := meta["cloud_build_run_id"]; ok {
+		t.Fatalf("legacy run metadata present: %#v", meta)
+	}
+}
+
+func TestServeHTTP_RunEnvelopeBedrockDiscovery(t *testing.T) {
+	var upstreamPath, rawQuery, auth string
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		rawQuery = r.URL.RawQuery
+		auth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"inferenceProfileSummaries":[]}`))
+	}))
+	defer mock.Close()
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	req := httptest.NewRequest("GET", "/runs/proj-run-1/inference-profiles?type=SYSTEM_DEFINED", nil)
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/inference-profiles" || rawQuery != "type=SYSTEM_DEFINED" {
+		t.Fatalf("upstream = %q?%s", upstreamPath, rawQuery)
+	}
+	if auth != "Bearer REAL-BEARER" {
+		t.Fatalf("Authorization = %q", auth)
+	}
+	if paths, _ := filepath.Glob(filepath.Join(proxy.logger.(*Logger).baseDir, "*", "*", "*.jsonl")); len(paths) != 0 {
+		t.Fatalf("discovery produced conversation log files: %v", paths)
+	}
+}
+
+func TestServeHTTP_RunEnvelopeBedrockProjectMismatch(t *testing.T) {
+	called := false
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+	proxy.tokenSub = newSub(t, writeScript(t, `printf '%s\n' '{"token":"REAL-BEARER","project":"proj","run_id":"stale-box"}'`))
+
+	req := httptest.NewRequest("POST", "/runs/other-run/model/anthropic.claude-3-haiku-20240307-v1:0/invoke",
+		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if called {
+		t.Fatal("upstream should not be called on project mismatch")
+	}
+}
+
+func TestServeHTTP_RunEnvelopeBedrockEmptyProjectAllowed(t *testing.T) {
+	var upstreamPath string
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"msg","type":"message","role":"assistant","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer mock.Close()
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+	proxy.tokenSub = newSub(t, writeScript(t, `printf '%s\n' '{"token":"REAL-BEARER","project":"","run_id":"stale-box"}'`))
+
+	req := httptest.NewRequest("POST", "/runs/other-run/model/anthropic.claude-3-haiku-20240307-v1:0/invoke",
+		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/model/anthropic.claude-3-haiku-20240307-v1:0/invoke" {
+		t.Fatalf("upstreamPath = %q", upstreamPath)
 	}
 }
 

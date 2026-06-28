@@ -63,6 +63,10 @@ type Proxy struct {
 	mantleRequireCloudBuildRunID bool
 }
 
+type RunAttribution struct {
+	RunID string
+}
+
 // createPassthroughClient creates an HTTP client configured for true passthrough proxying
 func createPassthroughClient() *http.Client {
 	transport := &http.Transport{
@@ -273,6 +277,15 @@ func randomHex(n int) string {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if env, ok, err := ParseRunEnvelope(r.URL.EscapedPath()); ok {
+		if err != nil {
+			http.Error(w, "invalid run attribution path", http.StatusBadRequest)
+			return
+		}
+		p.serveRunEnvelope(w, r, env)
+		return
+	}
+
 	// Route Bedrock requests before ParseProxyURL — Bedrock paths don't follow
 	// the /{provider}/{upstream}/{path} format
 	if strings.HasPrefix(r.URL.Path, "/model/") {
@@ -511,6 +524,19 @@ func copyHeaders(dst, src http.Header) {
 		for _, value := range values {
 			dst.Add(key, value)
 		}
+	}
+}
+
+func (p *Proxy) serveRunEnvelope(w http.ResponseWriter, r *http.Request, env RunEnvelope) {
+	attr := RunAttribution{RunID: env.RunID}
+
+	switch {
+	case strings.HasPrefix(env.InnerPath, "/model/"):
+		p.serveBedrockForPath(w, r, env.InnerPath, attr)
+	case env.InnerPath == "/inference-profiles":
+		p.serveBedrockDiscoveryForPath(w, r, env.InnerPath, attr)
+	default:
+		http.Error(w, "unknown run attribution route", http.StatusBadRequest)
 	}
 }
 

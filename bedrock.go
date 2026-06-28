@@ -170,6 +170,10 @@ func initBedrock(region string) (*bedrockState, error) {
 // that key, streams the response to the client, and decodes the eventstream for
 // observability after the stream completes.
 func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
+	p.serveBedrockForPath(w, r, r.URL.Path, RunAttribution{})
+}
+
+func (p *Proxy) serveBedrockForPath(w http.ResponseWriter, r *http.Request, innerPath string, attribution RunAttribution) {
 	if p.bedrock == nil {
 		http.Error(w, "Bedrock not configured", http.StatusServiceUnavailable)
 		return
@@ -182,13 +186,13 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
 	// Extract and validate model ID
-	modelID, err := extractModelID(r.URL.Path)
+	modelID, err := extractModelID(innerPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	streaming := isBedrockStreaming(r.URL.Path)
+	streaming := isBedrockStreaming(innerPath)
 
 	// Acquire concurrency semaphore
 	select {
@@ -227,6 +231,10 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "api token substitution failed", status)
 		return
 	}
+	if attribution.RunID != "" && resolved.Project != "" && !strings.HasPrefix(attribution.RunID, resolved.Project+"-") {
+		http.Error(w, "run attribution project mismatch", http.StatusForbidden)
+		return
+	}
 
 	// Session tracking and logging setup
 	var sessionID string
@@ -241,20 +249,26 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 	if shouldLog {
 		requestID = uuid.New().String()
 		if logger, ok := p.logger.(requestLogContextLogger); ok {
-			logger.SetRequestLogContext(requestID, RequestLogContext{
+			ctx := RequestLogContext{
 				Transport:     "bedrock",
 				ModelOverride: modelID,
-				LegacyRunID:   resolved.RunID,
 				ClientFPHash:  resolved.ClientFPHash,
 				Project:       resolved.Project,
 				ProviderRoute: "aws-bedrock",
 				WireAPI:       "messages",
-			})
+			}
+			if attribution.RunID != "" {
+				ctx.RunID = attribution.RunID
+				ctx.ResolvedRunID = resolved.RunID
+			} else {
+				ctx.LegacyRunID = resolved.RunID
+			}
+			logger.SetRequestLogContext(requestID, ctx)
 			defer logger.ClearRequestLogContext(requestID)
 		}
 
 		if p.sessionManager != nil {
-			sessionID, seq, isNewSession, err = p.sessionManager.GetOrCreateSession(reqBody, provider, upstream, r.Header, r.URL.Path)
+			sessionID, seq, isNewSession, err = p.sessionManager.GetOrCreateSession(reqBody, provider, upstream, r.Header, innerPath)
 			if err != nil {
 				sessionID = p.generateSessionID()
 				seq = 1
@@ -281,11 +295,11 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 		if isNewSession {
 			p.logger.LogSessionStart(sessionID, provider, upstream)
 		}
-		p.logger.LogRequest(sessionID, provider, seq, r.Method, r.URL.Path, r.Header, reqBody, requestID)
+		p.logger.LogRequest(sessionID, provider, seq, r.Method, innerPath, r.Header, reqBody, requestID)
 	}
 
 	// Build upstream URL — path stays the same since CC sends the Bedrock path format
-	upstreamURL := fmt.Sprintf("https://%s%s", upstream, r.URL.Path)
+	upstreamURL := fmt.Sprintf("https://%s%s", upstream, innerPath)
 
 	// Create the upstream request
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(reqBody))
@@ -334,6 +348,74 @@ func (p *Proxy) serveBedrock(w http.ResponseWriter, r *http.Request) {
 		p.serveBedrockStreaming(w, resp, startTime, modelID, upstream, provider, sessionID, seq, reqBody, requestID, patternState, shouldLog)
 	} else {
 		p.serveBedrockNonStreaming(w, resp, startTime, modelID, upstream, provider, sessionID, seq, reqBody, requestID, patternState, shouldLog)
+	}
+}
+
+func (p *Proxy) serveBedrockDiscoveryForPath(w http.ResponseWriter, r *http.Request, innerPath string, attribution RunAttribution) {
+	if p.bedrock == nil {
+		http.Error(w, "Bedrock not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if p.tokenSub == nil {
+		http.Error(w, "token substitution not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if innerPath != "/inference-profiles" {
+		http.Error(w, "unknown run attribution route", http.StatusBadRequest)
+		return
+	}
+
+	provider := "anthropic"
+	upstream := fmt.Sprintf("bedrock-runtime.%s.amazonaws.com", p.bedrock.region)
+	nonce, _ := readClientToken(r.Header)
+	resolved, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
+		APIToken:    nonce,
+		ClientHost:  r.RemoteAddr,
+		Provider:    provider,
+		ProviderURL: upstream,
+	})
+	if status != 0 {
+		http.Error(w, "api token substitution failed", status)
+		return
+	}
+	if attribution.RunID != "" && resolved.Project != "" && !strings.HasPrefix(attribution.RunID, resolved.Project+"-") {
+		http.Error(w, "run attribution project mismatch", http.StatusForbidden)
+		return
+	}
+
+	upstreamURL := fmt.Sprintf("https://%s%s", upstream, innerPath)
+	if rawQuery := r.URL.RawQuery; rawQuery != "" {
+		upstreamURL += "?" + rawQuery
+	}
+
+	proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
+	if err != nil {
+		http.Error(w, "failed to create request", http.StatusInternalServerError)
+		return
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		proxyReq.Header.Set("Content-Type", ct)
+	}
+	if accept := r.Header.Get("Accept"); accept != "" {
+		proxyReq.Header.Set("Accept", accept)
+	}
+	proxyReq.Header.Set("Authorization", "Bearer "+resolved.Token)
+
+	resp, err := p.bedrock.client.Do(proxyReq)
+	if err != nil {
+		http.Error(w, "upstream request failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	copyHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("bedrock discovery response copy failed: %v", err)
 	}
 }
 
