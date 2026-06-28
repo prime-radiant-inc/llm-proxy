@@ -318,6 +318,20 @@ func proxyWithSub(t *testing.T, scriptBody string) *Proxy {
 	return p
 }
 
+func cachedSub(provider, providerURL, presentedToken string, resolved ResolveResult) *APITokenSubstituter {
+	s := &APITokenSubstituter{
+		ttl:     time.Minute,
+		maxSize: 1,
+		cache:   make(map[string]cacheEntry),
+	}
+	s.cachePut(cacheKey(ResolveContext{
+		APIToken:    presentedToken,
+		Provider:    provider,
+		ProviderURL: providerURL,
+	}), resolved)
+	return s
+}
+
 func TestSubstitutionReplacesKeyOnEveryEndpoint(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(r.Header.Get("X-Api-Key")))
@@ -487,4 +501,217 @@ func TestSubstitutionResolvedKeyNeverLogged(t *testing.T) {
 			t.Errorf("expected fixed error string, got: %s", body)
 		}
 	})
+}
+
+func TestRunEnvelopeGenericOpenAIResponsesStripsPrefixAndLogsRunMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	var upstreamPath, rawQuery, apiKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		rawQuery = r.URL.RawQuery
+		apiKey = r.Header.Get("X-Api-Key")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"resp_123","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`))
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	proxy := NewProxyWithLogger(logger)
+	proxy.tokenSub = cachedSub("openai", host, "nonce-key", ResolveResult{
+		Token:   "REAL-KEY",
+		Project: "proj",
+		RunID:   "stale-run",
+	})
+
+	req := httptest.NewRequest("POST", "/runs/proj-run-1/openai/"+host+"/v1/responses?trace=1",
+		strings.NewReader(`{"model":"gpt-4.1","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", "nonce-key")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/v1/responses" {
+		t.Fatalf("upstreamPath = %q, want /v1/responses", upstreamPath)
+	}
+	if rawQuery != "trace=1" {
+		t.Fatalf("rawQuery = %q, want trace=1", rawQuery)
+	}
+	if apiKey != "REAL-KEY" {
+		t.Fatalf("X-Api-Key = %q, want REAL-KEY", apiKey)
+	}
+
+	entries := readObservationLogEntries(t, logger)
+	requestMeta := findLogEntryByType(t, entries, "request")["_meta"].(map[string]any)
+	assertMetaString(t, requestMeta, "run_id", "proj-run-1")
+	assertMetaString(t, requestMeta, "resolved_run_id", "stale-run")
+}
+
+func TestRunEnvelopeGenericAnthropicMessagesStripsPrefixAndLogsRunMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	var upstreamPath, apiKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		apiKey = r.Header.Get("X-Api-Key")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	proxy := NewProxyWithLogger(logger)
+	proxy.tokenSub = cachedSub("anthropic", host, "nonce-key", ResolveResult{
+		Token:   "REAL-KEY",
+		Project: "proj",
+		RunID:   "stale-run",
+	})
+
+	req := httptest.NewRequest("POST", "/runs/proj-run-1/anthropic/"+host+"/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", "nonce-key")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/v1/messages" {
+		t.Fatalf("upstreamPath = %q, want /v1/messages", upstreamPath)
+	}
+	if apiKey != "REAL-KEY" {
+		t.Fatalf("X-Api-Key = %q, want REAL-KEY", apiKey)
+	}
+
+	entries := readObservationLogEntries(t, logger)
+	requestMeta := findLogEntryByType(t, entries, "request")["_meta"].(map[string]any)
+	assertMetaString(t, requestMeta, "run_id", "proj-run-1")
+	assertMetaString(t, requestMeta, "resolved_run_id", "stale-run")
+}
+
+func TestRunEnvelopeGenericProjectMismatchRejected(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	proxy := NewProxy()
+	proxy.tokenSub = cachedSub("openai", host, "nonce-key", ResolveResult{
+		Token:   "REAL-KEY",
+		Project: "proj",
+		RunID:   "stale-run",
+	})
+
+	req := httptest.NewRequest("POST", "/runs/other-run/openai/"+host+"/v1/responses",
+		strings.NewReader(`{"model":"gpt-4.1","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", "nonce-key")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if called {
+		t.Fatal("upstream should not be called on project mismatch")
+	}
+}
+
+func TestRunEnvelopeGenericEmptyProjectAllowed(t *testing.T) {
+	var upstreamPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"resp_123","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`))
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	proxy := NewProxy()
+	proxy.tokenSub = cachedSub("openai", host, "nonce-key", ResolveResult{
+		Token:   "REAL-KEY",
+		Project: "",
+		RunID:   "stale-run",
+	})
+
+	req := httptest.NewRequest("POST", "/runs/other-run/openai/"+host+"/v1/responses",
+		strings.NewReader(`{"model":"gpt-4.1","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", "nonce-key")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/v1/responses" {
+		t.Fatalf("upstreamPath = %q, want /v1/responses", upstreamPath)
+	}
+}
+
+func TestRunEnvelopeGenericBareRouteDoesNotMintRunMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"resp_123","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}`))
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	proxy := NewProxyWithLogger(logger)
+	proxy.tokenSub = cachedSub("openai", host, "nonce-key", ResolveResult{
+		Token:   "REAL-KEY",
+		Project: "proj",
+		RunID:   "stale-run",
+	})
+
+	req := httptest.NewRequest("POST", "/openai/"+host+"/v1/responses",
+		strings.NewReader(`{"model":"gpt-4.1","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", "nonce-key")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+
+	entries := readObservationLogEntries(t, logger)
+	requestMeta := findLogEntryByType(t, entries, "request")["_meta"].(map[string]any)
+	if _, ok := requestMeta["run_id"]; ok {
+		t.Fatalf("bare route unexpectedly logged run_id: %#v", requestMeta)
+	}
+	if _, ok := requestMeta["resolved_run_id"]; ok {
+		t.Fatalf("bare route unexpectedly logged resolved_run_id: %#v", requestMeta)
+	}
 }

@@ -323,19 +323,47 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.serveMantle(w, r)
 		return
 	}
+	p.serveGenericProxyForPath(w, r, r.URL.Path, RunAttribution{})
+}
 
+func copyHeaders(dst, src http.Header) {
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func (p *Proxy) serveRunEnvelope(w http.ResponseWriter, r *http.Request, env RunEnvelope) {
+	attr := RunAttribution{RunID: env.RunID}
+
+	switch {
+	case strings.HasPrefix(env.InnerPath, "/model/"):
+		p.serveBedrockForPath(w, r, env.InnerPath, attr)
+	case env.InnerPath == "/inference-profiles":
+		p.serveBedrockDiscoveryForPath(w, r, env.InnerPath, attr)
+	case env.InnerPath == "/mantle/v1/responses":
+		p.serveMantleForPath(w, r, env.RunID, env.InnerPath)
+	case strings.HasPrefix(env.InnerPath, "/openai/"), strings.HasPrefix(env.InnerPath, "/anthropic/"):
+		p.serveGenericProxyForPath(w, r, env.InnerPath, attr)
+	default:
+		http.Error(w, "unknown run attribution route", http.StatusBadRequest)
+	}
+}
+
+func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request, innerPath string, attribution RunAttribution) {
 	startTime := time.Now()
 
 	// Parse the proxy URL
-	provider, upstream, path, err := ParseProxyURL(r.URL.Path)
+	provider, upstream, path, err := ParseProxyURL(innerPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// For OpenAI requests, dynamically route based on auth type:
-	// - JWT tokens (ChatGPT OAuth) → chatgpt.com/backend-api/codex
-	// - API keys (sk-...) → api.openai.com
+	// - JWT tokens (ChatGPT OAuth) -> chatgpt.com/backend-api/codex
+	// - API keys (sk-...) -> api.openai.com
 	if provider == "openai" && upstream == "api.openai.com" {
 		if isJWTAuth(r.Header) {
 			upstream = "chatgpt.com"
@@ -379,11 +407,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Set host header
 	proxyReq.Host = upstream
 
+	var resolved ResolveResult
+
 	// API token substitution: resolve the presented token to the real provider key and replace the
 	// auth header. Runs on every endpoint, before any logging, fail-closed (no upstream on failure).
 	if p.tokenSub != nil {
 		token, hdrName := readClientToken(r.Header)
-		resolved, status, _ := p.tokenSub.Resolve(r.Context(), ResolveContext{
+		var status int
+		resolved, status, _ = p.tokenSub.Resolve(r.Context(), ResolveContext{
 			APIToken:    token,
 			ClientHost:  r.RemoteAddr,
 			Provider:    provider,
@@ -394,6 +425,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		setResolvedKey(proxyReq.Header, hdrName, resolved.Token)
+	}
+
+	if attribution.RunID != "" && resolved.Project != "" && !strings.HasPrefix(attribution.RunID, resolved.Project+"-") {
+		http.Error(w, "run attribution project mismatch", http.StatusForbidden)
+		return
 	}
 
 	// Determine session ID and sequence for logging (conversation endpoints only)
@@ -407,6 +443,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if shouldLog {
 		// Generate unique request ID for this API call
 		requestID = uuid.New().String()
+
+		if attribution.RunID != "" {
+			if logger, ok := p.logger.(requestLogContextLogger); ok {
+				logger.SetRequestLogContext(requestID, RequestLogContext{
+					RunID:         attribution.RunID,
+					ResolvedRunID: resolved.RunID,
+					ClientFPHash:  resolved.ClientFPHash,
+					Project:       resolved.Project,
+					ProviderRoute: provider,
+					WireAPI:       genericWireAPI(path),
+				})
+				defer logger.ClearRequestLogContext(requestID)
+			}
+		}
 
 		if p.sessionManager != nil {
 			var err error
@@ -519,29 +569,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Write(respBody)
 }
 
-func copyHeaders(dst, src http.Header) {
-	for key, values := range src {
-		for _, value := range values {
-			dst.Add(key, value)
-		}
-	}
-}
-
-func (p *Proxy) serveRunEnvelope(w http.ResponseWriter, r *http.Request, env RunEnvelope) {
-	attr := RunAttribution{RunID: env.RunID}
-
-	switch {
-	case strings.HasPrefix(env.InnerPath, "/model/"):
-		p.serveBedrockForPath(w, r, env.InnerPath, attr)
-	case env.InnerPath == "/inference-profiles":
-		p.serveBedrockDiscoveryForPath(w, r, env.InnerPath, attr)
-	case env.InnerPath == "/mantle/v1/responses":
-		p.serveMantleForPath(w, r, env.RunID, env.InnerPath)
-	default:
-		http.Error(w, "unknown run attribution route", http.StatusBadRequest)
-	}
-}
-
 // isLocalhost checks if the host is localhost for determining http vs https scheme.
 func isLocalhost(host string) bool {
 	hostname := host
@@ -649,4 +676,19 @@ func isConversationEndpoint(path string) bool {
 	}
 
 	return false
+}
+
+func genericWireAPI(path string) string {
+	switch {
+	case path == "/v1/messages":
+		return "messages"
+	case path == "/v1/responses":
+		return "responses"
+	case path == "/v1/chat/completions":
+		return "chat-completions"
+	case strings.HasPrefix(path, "/backend-api/codex/") && strings.HasSuffix(path, "/responses"):
+		return "chatgpt-codex"
+	default:
+		return ""
+	}
 }
