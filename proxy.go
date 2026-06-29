@@ -62,8 +62,12 @@ type Proxy struct {
 	bedrock                      *bedrockState
 	tokenSub                     *APITokenSubstituter
 	mantleRequireCloudBuildRunID bool
-	allowedUpstreams             map[string][]string
-	allowLoopbackUpstream        bool // test-only; default false in prod
+	// allowedUpstreams is the config-driven SSRF allowlist (provider -> hosts).
+	// Production wiring from config is deferred until the config field exists;
+	// until then this is unset in prod (default-open gate) and is populated only
+	// in tests. Wire it from config when the corresponding config field lands.
+	allowedUpstreams      map[string][]string
+	allowLoopbackUpstream bool // test-only; default false in prod
 }
 
 type RunAttribution struct {
