@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -61,6 +62,8 @@ type Proxy struct {
 	bedrock                      *bedrockState
 	tokenSub                     *APITokenSubstituter
 	mantleRequireCloudBuildRunID bool
+	allowedUpstreams             map[string][]string
+	allowLoopbackUpstream        bool // test-only; default false in prod
 }
 
 type RunAttribution struct {
@@ -365,6 +368,16 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Run-envelope SSRF gate: only attributed envelope calls (RunID set) are
+	// constrained to the configured upstream allowlist. The legacy host-agnostic
+	// passthrough carries an empty RunID and is intentionally unconstrained.
+	if attribution.RunID != "" {
+		if err := p.checkUpstreamAllowed(provider, upstream); err != nil {
+			http.Error(w, "upstream not allowed", http.StatusForbidden)
+			return
+		}
+	}
+
 	// For OpenAI requests, dynamically route based on auth type:
 	// - JWT tokens (ChatGPT OAuth) -> chatgpt.com/backend-api/codex
 	// - API keys (sk-...) -> api.openai.com
@@ -574,6 +587,36 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 }
 
 // isLocalhost checks if the host is localhost for determining http vs https scheme.
+// normalizeUpstreamHost lowercases the host and strips an explicit default
+// (443) port so allowlist matching is case- and default-port-insensitive.
+func normalizeUpstreamHost(host string) string {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if hostname, port, err := net.SplitHostPort(h); err == nil && port == "443" {
+		return hostname
+	}
+	return h
+}
+
+// checkUpstreamAllowed returns nil if the upstream is permitted for the run-envelope
+// path. An empty allowlist is default-open. When allowLoopbackUpstream is set
+// (test-only), loopback upstreams bypass the list; in prod it is off so loopback
+// is constrained like any other host.
+func (p *Proxy) checkUpstreamAllowed(provider, upstream string) error {
+	if len(p.allowedUpstreams) == 0 {
+		return nil
+	}
+	if p.allowLoopbackUpstream && isLocalhost(upstream) {
+		return nil
+	}
+	want := normalizeUpstreamHost(upstream)
+	for _, allowed := range p.allowedUpstreams[provider] {
+		if normalizeUpstreamHost(allowed) == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("upstream %q not in allowlist for provider %q", upstream, provider)
+}
+
 func isLocalhost(host string) bool {
 	hostname := host
 	if h, _, err := net.SplitHostPort(host); err == nil {

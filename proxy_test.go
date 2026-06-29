@@ -715,3 +715,104 @@ func TestRunEnvelopeGenericBareRouteDoesNotMintRunMetadata(t *testing.T) {
 		t.Fatalf("bare route unexpectedly logged resolved_run_id: %#v", requestMeta)
 	}
 }
+
+func TestRunEnvelopeAllowlistAcceptsConfiguredHost(t *testing.T) {
+	var upstreamPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	proxy := NewProxy()
+	proxy.allowedUpstreams = map[string][]string{"openai": {host}}
+	proxy.tokenSub = cachedSub("openai", host, "nonce-key", ResolveResult{Token: "REAL-KEY", Project: "proj"})
+
+	req := httptest.NewRequest("POST", "/runs/proj-run-1/openai/"+host+"/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4.1"}`))
+	req.Header.Set("X-Api-Key", "nonce-key")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/v1/chat/completions" {
+		t.Fatalf("upstreamPath = %q", upstreamPath)
+	}
+}
+
+func TestRunEnvelopeAllowlistRejectsUnlistedHostInProdMode(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	proxy := NewProxy()
+	// Non-empty allowlist that does NOT contain the loopback test host; loopback
+	// exemption OFF (prod mode) → the loopback upstream must fail closed.
+	proxy.allowedUpstreams = map[string][]string{"openai": {"some-other-host.example"}}
+	proxy.allowLoopbackUpstream = false
+	proxy.tokenSub = cachedSub("openai", host, "nonce-key", ResolveResult{Token: "REAL-KEY", Project: "proj"})
+
+	req := httptest.NewRequest("POST", "/runs/proj-run-1/openai/"+host+"/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4.1"}`))
+	req.Header.Set("X-Api-Key", "nonce-key")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+	if called {
+		t.Fatal("upstream must not be called when host is not allowlisted")
+	}
+}
+
+func TestRunEnvelopeAllowlistNormalizesHostCaseAndPort(t *testing.T) {
+	proxy := NewProxy()
+	proxy.allowedUpstreams = map[string][]string{"openai": {"API.EXAMPLE.COM:443"}}
+	if err := proxy.checkUpstreamAllowed("openai", "api.example.com"); err != nil {
+		t.Fatalf("expected api.example.com to match API.EXAMPLE.COM:443 after normalization, got %v", err)
+	}
+	if err := proxy.checkUpstreamAllowed("openai", "evil.example"); err == nil {
+		t.Fatal("expected evil.example to be rejected")
+	}
+}
+
+func TestLegacyPassthroughIgnoresAllowlist(t *testing.T) {
+	var upstreamPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	proxy := NewProxy()
+	// Allowlist that would reject this host on the envelope path; loopback exempt OFF.
+	proxy.allowedUpstreams = map[string][]string{"openai": {"some-other-host.example"}}
+	proxy.allowLoopbackUpstream = false
+
+	// Legacy passthrough: no /runs/ prefix → RunAttribution{} → gate must not apply.
+	req := httptest.NewRequest("POST", "/openai/"+host+"/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4.1"}`))
+	req.Header.Set("X-Api-Key", "sk-test")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("legacy passthrough status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/v1/chat/completions" {
+		t.Fatalf("upstreamPath = %q", upstreamPath)
+	}
+}
