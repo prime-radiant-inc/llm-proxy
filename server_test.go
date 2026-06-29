@@ -372,3 +372,23 @@ func TestNewServerWiresMantleRunIDRequirement(t *testing.T) {
 		t.Fatal("expected mantleRequireCloudBuildRunID to be wired to proxy")
 	}
 }
+
+func TestNewServerWiresAllowedUpstreams(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LogDir = t.TempDir()
+	cfg.AllowedUpstreams = map[string][]string{"openai": {"api.example.com"}}
+
+	srv, err := NewServer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The configured allowlist must actually populate the proxy so the SSRF gate
+	// enforces it in production rather than defaulting open.
+	if err := srv.proxy.checkUpstreamAllowed("openai", "api.example.com"); err != nil {
+		t.Fatalf("expected configured host to be allowed, got %v", err)
+	}
+	if err := srv.proxy.checkUpstreamAllowed("openai", "other.example.com"); err == nil {
+		t.Fatal("expected unconfigured host to be rejected once the allowlist is wired from config")
+	}
+}

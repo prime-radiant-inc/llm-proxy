@@ -54,6 +54,11 @@ type Config struct {
 	Loki                         LokiConfig                 `toml:"loki"`
 	ListenHost                   string                     `toml:"listen_host"`
 	APITokenSubstitution         APITokenSubstitutionConfig `toml:"api_token_substitution"`
+	// AllowedUpstreams restricts which upstream hosts the attributed run-envelope
+	// path may reach, keyed by provider segment. Absent/empty ⇒ allow all hosts
+	// (default-open for the general-purpose binary). Deployments supply concrete
+	// host values; the source names no specific upstream.
+	AllowedUpstreams map[string][]string `toml:"allowed_upstreams"`
 }
 
 func DefaultConfig() Config {

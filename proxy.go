@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -61,6 +62,11 @@ type Proxy struct {
 	bedrock                      *bedrockState
 	tokenSub                     *APITokenSubstituter
 	mantleRequireCloudBuildRunID bool
+	// allowedUpstreams is the config-driven SSRF allowlist (provider -> hosts),
+	// populated from the configured allowlist at construction. An empty map is
+	// default-open (the general-purpose binary); deployments supply concrete hosts.
+	allowedUpstreams      map[string][]string
+	allowLoopbackUpstream bool // test-only; default false in prod
 }
 
 type RunAttribution struct {
@@ -365,6 +371,16 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Run-envelope SSRF gate: only attributed envelope calls (RunID set) are
+	// constrained to the configured upstream allowlist. The legacy host-agnostic
+	// passthrough carries an empty RunID and is intentionally unconstrained.
+	if attribution.RunID != "" {
+		if err := p.checkUpstreamAllowed(provider, upstream); err != nil {
+			http.Error(w, "upstream not allowed", http.StatusForbidden)
+			return
+		}
+	}
+
 	// For OpenAI requests, dynamically route based on auth type:
 	// - JWT tokens (ChatGPT OAuth) -> chatgpt.com/backend-api/codex
 	// - API keys (sk-...) -> api.openai.com
@@ -436,13 +452,16 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Determine session ID and sequence for logging (conversation endpoints only)
+	// Determine session ID and sequence for logging. Conversation endpoints get
+	// full session handling; attributed run-envelope calls are also logged and
+	// run-id-stamped via the synthetic-session route, without session
+	// fingerprinting / fork detection / turn events.
 	var sessionID string
 	var seq int
 	var isNewSession bool
 	var requestID string
 	var patternState *PatternState
-	shouldLog := p.logger != nil && isConversationEndpoint(path)
+	shouldLog := p.logger != nil && (isConversationEndpoint(path) || attribution.RunID != "")
 
 	if shouldLog {
 		// Generate unique request ID for this API call
@@ -462,7 +481,10 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
-		if p.sessionManager != nil {
+		// Only conversation endpoints get real session handling (fingerprinting,
+		// fork detection, turn events). Attributed non-conversation calls fall
+		// through to the synthetic-session branch below.
+		if p.sessionManager != nil && isConversationEndpoint(path) {
 			var err error
 			sessionID, seq, isNewSession, err = p.sessionManager.GetOrCreateSession(reqBody, provider, upstream, r.Header, path)
 			if err != nil {
@@ -571,6 +593,36 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 
 	// Write response body
 	w.Write(respBody)
+}
+
+// normalizeUpstreamHost lowercases the host and strips an explicit default
+// (443) port so allowlist matching is case- and default-port-insensitive.
+func normalizeUpstreamHost(host string) string {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if hostname, port, err := net.SplitHostPort(h); err == nil && port == "443" {
+		return hostname
+	}
+	return h
+}
+
+// checkUpstreamAllowed returns nil if the upstream is permitted for the run-envelope
+// path. An empty allowlist is default-open. When allowLoopbackUpstream is set
+// (test-only), loopback upstreams bypass the list; in prod it is off so loopback
+// is constrained like any other host.
+func (p *Proxy) checkUpstreamAllowed(provider, upstream string) error {
+	if len(p.allowedUpstreams) == 0 {
+		return nil
+	}
+	if p.allowLoopbackUpstream && isLocalhost(upstream) {
+		return nil
+	}
+	want := normalizeUpstreamHost(upstream)
+	for _, allowed := range p.allowedUpstreams[provider] {
+		if normalizeUpstreamHost(allowed) == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("upstream %q not in allowlist for provider %q", upstream, provider)
 }
 
 // isLocalhost checks if the host is localhost for determining http vs https scheme.

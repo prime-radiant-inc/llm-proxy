@@ -317,3 +317,31 @@ environment = "production"
 		t.Errorf("expected Loki.Environment 'production', got %q", cfg.Loki.Environment)
 	}
 }
+
+func TestLoadConfigFromTOML_AllowedUpstreams(t *testing.T) {
+	tomlContent := `
+[allowed_upstreams]
+primary = ["api.example.com", "api2.example.com"]
+secondary = ["api3.example.com"]
+`
+	cfg, err := LoadConfigFromTOML([]byte(tomlContent))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.AllowedUpstreams["primary"]; len(got) != 2 || got[0] != "api.example.com" || got[1] != "api2.example.com" {
+		t.Errorf("AllowedUpstreams[primary] = %v, want [api.example.com api2.example.com]", got)
+	}
+	if got := cfg.AllowedUpstreams["secondary"]; len(got) != 1 || got[0] != "api3.example.com" {
+		t.Errorf("AllowedUpstreams[secondary] = %v, want [api3.example.com]", got)
+	}
+}
+
+func TestLoadConfigFromTOML_AllowedUpstreamsAbsentIsEmpty(t *testing.T) {
+	cfg, err := LoadConfigFromTOML([]byte(`listen_host = "0.0.0.0"`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.AllowedUpstreams) != 0 {
+		t.Errorf("expected empty AllowedUpstreams (default-open), got %v", cfg.AllowedUpstreams)
+	}
+}

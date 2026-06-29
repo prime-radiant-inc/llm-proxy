@@ -80,6 +80,7 @@ func NewServer(cfg Config) (*Server, error) {
 
 	proxy := NewProxyWithEventEmitter(multiWriter, sessionManager, eventEmitter, machineID)
 	proxy.mantleRequireCloudBuildRunID = cfg.MantleRequireCloudBuildRunID
+	proxy.allowedUpstreams = cfg.AllowedUpstreams
 
 	// Initialize Bedrock if region is configured
 	if cfg.BedrockRegion != "" {

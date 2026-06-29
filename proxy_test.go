@@ -607,6 +607,84 @@ func TestRunEnvelopeGenericAnthropicMessagesStripsPrefixAndLogsRunMetadata(t *te
 	assertMetaString(t, requestMeta, "resolved_run_id", "stale-run")
 }
 
+func TestRunEnvelopeNonConversationAttributedRequestLoggedAndRunStamped(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	var upstreamPath, apiKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		apiKey = r.Header.Get("X-Api-Key")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"cmpl_1","usage":{"prompt_tokens":3,"completion_tokens":4}}`))
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	// Use a real session manager to prove the non-conversation path skips it
+	// (synthetic session) rather than fingerprinting the inner body. A recording
+	// event emitter lets us assert that the synthetic route emits no turn/tool
+	// observability events at all.
+	sm, err := NewSessionManager(t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("NewSessionManager: %v", err)
+	}
+	emitter := &MockEventEmitter{}
+	proxy := NewProxyWithEventEmitter(logger, sm, emitter, "test-machine")
+	proxy.tokenSub = cachedSub("openai", host, "nonce-key", ResolveResult{
+		Token:   "REAL-KEY",
+		Project: "proj",
+		RunID:   "stale-run",
+	})
+
+	// A generic, non-/v1 inner path that isConversationEndpoint does not match.
+	req := httptest.NewRequest("POST", "/runs/proj-run-1/openai/"+host+"/api/inference/generate",
+		strings.NewReader(`{"model":"generic-model","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", "nonce-key")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/api/inference/generate" {
+		t.Fatalf("upstreamPath = %q", upstreamPath)
+	}
+	if apiKey != "REAL-KEY" {
+		t.Fatalf("X-Api-Key = %q, want REAL-KEY", apiKey)
+	}
+
+	entries := readObservationLogEntries(t, logger)
+	requestMeta := findLogEntryByType(t, entries, "request")["_meta"].(map[string]any)
+	assertMetaString(t, requestMeta, "run_id", "proj-run-1")
+	assertMetaString(t, requestMeta, "resolved_run_id", "stale-run")
+
+	// The synthetic-session route must bypass fingerprinting / fork detection /
+	// turn emission entirely. A non-conversation attributed request must emit
+	// zero turn and tool observability events. This guards the
+	// `&& isConversationEndpoint(path)` session guard against regression: drop it
+	// and this request would run GetOrCreateSession and emit turn events.
+	if n := len(emitter.TurnStartEvents); n != 0 {
+		t.Errorf("turn_start events = %d, want 0 (synthetic route must not emit turns)", n)
+	}
+	if n := len(emitter.TurnEndEvents); n != 0 {
+		t.Errorf("turn_end events = %d, want 0 (synthetic route must not emit turns)", n)
+	}
+	if n := len(emitter.ToolCallEvents); n != 0 {
+		t.Errorf("tool_call events = %d, want 0 (synthetic route must not emit tool calls)", n)
+	}
+	if n := len(emitter.ToolResultEvents); n != 0 {
+		t.Errorf("tool_result events = %d, want 0 (synthetic route must not emit tool results)", n)
+	}
+}
+
 func TestRunEnvelopeGenericProjectMismatchRejected(t *testing.T) {
 	called := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -713,5 +791,106 @@ func TestRunEnvelopeGenericBareRouteDoesNotMintRunMetadata(t *testing.T) {
 	}
 	if _, ok := requestMeta["resolved_run_id"]; ok {
 		t.Fatalf("bare route unexpectedly logged resolved_run_id: %#v", requestMeta)
+	}
+}
+
+func TestRunEnvelopeAllowlistAcceptsConfiguredHost(t *testing.T) {
+	var upstreamPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	proxy := NewProxy()
+	proxy.allowedUpstreams = map[string][]string{"openai": {host}}
+	proxy.tokenSub = cachedSub("openai", host, "nonce-key", ResolveResult{Token: "REAL-KEY", Project: "proj"})
+
+	req := httptest.NewRequest("POST", "/runs/proj-run-1/openai/"+host+"/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4.1"}`))
+	req.Header.Set("X-Api-Key", "nonce-key")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/v1/chat/completions" {
+		t.Fatalf("upstreamPath = %q", upstreamPath)
+	}
+}
+
+func TestRunEnvelopeAllowlistRejectsUnlistedHostInProdMode(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	proxy := NewProxy()
+	// Non-empty allowlist that does NOT contain the loopback test host; loopback
+	// exemption OFF (prod mode) → the loopback upstream must fail closed.
+	proxy.allowedUpstreams = map[string][]string{"openai": {"some-other-host.example"}}
+	proxy.allowLoopbackUpstream = false
+	proxy.tokenSub = cachedSub("openai", host, "nonce-key", ResolveResult{Token: "REAL-KEY", Project: "proj"})
+
+	req := httptest.NewRequest("POST", "/runs/proj-run-1/openai/"+host+"/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4.1"}`))
+	req.Header.Set("X-Api-Key", "nonce-key")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+	if called {
+		t.Fatal("upstream must not be called when host is not allowlisted")
+	}
+}
+
+func TestRunEnvelopeAllowlistNormalizesHostCaseAndPort(t *testing.T) {
+	proxy := NewProxy()
+	proxy.allowedUpstreams = map[string][]string{"openai": {"API.EXAMPLE.COM:443"}}
+	if err := proxy.checkUpstreamAllowed("openai", "api.example.com"); err != nil {
+		t.Fatalf("expected api.example.com to match API.EXAMPLE.COM:443 after normalization, got %v", err)
+	}
+	if err := proxy.checkUpstreamAllowed("openai", "evil.example"); err == nil {
+		t.Fatal("expected evil.example to be rejected")
+	}
+}
+
+func TestLegacyPassthroughIgnoresAllowlist(t *testing.T) {
+	var upstreamPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	proxy := NewProxy()
+	// Allowlist that would reject this host on the envelope path; loopback exempt OFF.
+	proxy.allowedUpstreams = map[string][]string{"openai": {"some-other-host.example"}}
+	proxy.allowLoopbackUpstream = false
+
+	// Legacy passthrough: no /runs/ prefix → RunAttribution{} → gate must not apply.
+	req := httptest.NewRequest("POST", "/openai/"+host+"/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4.1"}`))
+	req.Header.Set("X-Api-Key", "sk-test")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("legacy passthrough status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/v1/chat/completions" {
+		t.Fatalf("upstreamPath = %q", upstreamPath)
 	}
 }
