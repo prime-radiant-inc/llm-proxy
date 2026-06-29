@@ -452,13 +452,16 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Determine session ID and sequence for logging (conversation endpoints only)
+	// Determine session ID and sequence for logging. Conversation endpoints get
+	// full session handling; attributed run-envelope calls are also logged and
+	// run-id-stamped via the synthetic-session route, without session
+	// fingerprinting / fork detection / turn events.
 	var sessionID string
 	var seq int
 	var isNewSession bool
 	var requestID string
 	var patternState *PatternState
-	shouldLog := p.logger != nil && isConversationEndpoint(path)
+	shouldLog := p.logger != nil && (isConversationEndpoint(path) || attribution.RunID != "")
 
 	if shouldLog {
 		// Generate unique request ID for this API call
@@ -478,7 +481,10 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
-		if p.sessionManager != nil {
+		// Only conversation endpoints get real session handling (fingerprinting,
+		// fork detection, turn events). Attributed non-conversation calls fall
+		// through to the synthetic-session branch below.
+		if p.sessionManager != nil && isConversationEndpoint(path) {
 			var err error
 			sessionID, seq, isNewSession, err = p.sessionManager.GetOrCreateSession(reqBody, provider, upstream, r.Header, path)
 			if err != nil {

@@ -607,6 +607,63 @@ func TestRunEnvelopeGenericAnthropicMessagesStripsPrefixAndLogsRunMetadata(t *te
 	assertMetaString(t, requestMeta, "resolved_run_id", "stale-run")
 }
 
+func TestRunEnvelopeNonConversationAttributedRequestLoggedAndRunStamped(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	var upstreamPath, apiKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		apiKey = r.Header.Get("X-Api-Key")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"cmpl_1","usage":{"prompt_tokens":3,"completion_tokens":4}}`))
+	}))
+	defer upstream.Close()
+
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	// Use a real session manager to prove the non-conversation path skips it
+	// (synthetic session) rather than fingerprinting the inner body.
+	sm, err := NewSessionManager(t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("NewSessionManager: %v", err)
+	}
+	proxy := NewProxyWithSessionManagerAndLogger(logger, sm)
+	proxy.tokenSub = cachedSub("openai", host, "nonce-key", ResolveResult{
+		Token:   "REAL-KEY",
+		Project: "proj",
+		RunID:   "stale-run",
+	})
+
+	// A generic, non-/v1 inner path that isConversationEndpoint does not match.
+	req := httptest.NewRequest("POST", "/runs/proj-run-1/openai/"+host+"/api/inference/generate",
+		strings.NewReader(`{"model":"generic-model","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Api-Key", "nonce-key")
+	w := httptest.NewRecorder()
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if upstreamPath != "/api/inference/generate" {
+		t.Fatalf("upstreamPath = %q", upstreamPath)
+	}
+	if apiKey != "REAL-KEY" {
+		t.Fatalf("X-Api-Key = %q, want REAL-KEY", apiKey)
+	}
+
+	entries := readObservationLogEntries(t, logger)
+	requestMeta := findLogEntryByType(t, entries, "request")["_meta"].(map[string]any)
+	assertMetaString(t, requestMeta, "run_id", "proj-run-1")
+	assertMetaString(t, requestMeta, "resolved_run_id", "stale-run")
+}
+
 func TestRunEnvelopeGenericProjectMismatchRejected(t *testing.T) {
 	called := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
