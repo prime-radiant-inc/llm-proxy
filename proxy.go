@@ -62,10 +62,9 @@ type Proxy struct {
 	bedrock                      *bedrockState
 	tokenSub                     *APITokenSubstituter
 	mantleRequireCloudBuildRunID bool
-	// allowedUpstreams is the config-driven SSRF allowlist (provider -> hosts).
-	// Production wiring from config is deferred until the config field exists;
-	// until then this is unset in prod (default-open gate) and is populated only
-	// in tests. Wire it from config when the corresponding config field lands.
+	// allowedUpstreams is the config-driven SSRF allowlist (provider -> hosts),
+	// populated from the configured allowlist at construction. An empty map is
+	// default-open (the general-purpose binary); deployments supply concrete hosts.
 	allowedUpstreams      map[string][]string
 	allowLoopbackUpstream bool // test-only; default false in prod
 }
