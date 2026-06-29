@@ -628,12 +628,15 @@ func TestRunEnvelopeNonConversationAttributedRequestLoggedAndRunStamped(t *testi
 	defer logger.Close()
 
 	// Use a real session manager to prove the non-conversation path skips it
-	// (synthetic session) rather than fingerprinting the inner body.
+	// (synthetic session) rather than fingerprinting the inner body. A recording
+	// event emitter lets us assert that the synthetic route emits no turn/tool
+	// observability events at all.
 	sm, err := NewSessionManager(t.TempDir(), logger)
 	if err != nil {
 		t.Fatalf("NewSessionManager: %v", err)
 	}
-	proxy := NewProxyWithSessionManagerAndLogger(logger, sm)
+	emitter := &MockEventEmitter{}
+	proxy := NewProxyWithEventEmitter(logger, sm, emitter, "test-machine")
 	proxy.tokenSub = cachedSub("openai", host, "nonce-key", ResolveResult{
 		Token:   "REAL-KEY",
 		Project: "proj",
@@ -662,6 +665,24 @@ func TestRunEnvelopeNonConversationAttributedRequestLoggedAndRunStamped(t *testi
 	requestMeta := findLogEntryByType(t, entries, "request")["_meta"].(map[string]any)
 	assertMetaString(t, requestMeta, "run_id", "proj-run-1")
 	assertMetaString(t, requestMeta, "resolved_run_id", "stale-run")
+
+	// The synthetic-session route must bypass fingerprinting / fork detection /
+	// turn emission entirely. A non-conversation attributed request must emit
+	// zero turn and tool observability events. This guards the
+	// `&& isConversationEndpoint(path)` session guard against regression: drop it
+	// and this request would run GetOrCreateSession and emit turn events.
+	if n := len(emitter.TurnStartEvents); n != 0 {
+		t.Errorf("turn_start events = %d, want 0 (synthetic route must not emit turns)", n)
+	}
+	if n := len(emitter.TurnEndEvents); n != 0 {
+		t.Errorf("turn_end events = %d, want 0 (synthetic route must not emit turns)", n)
+	}
+	if n := len(emitter.ToolCallEvents); n != 0 {
+		t.Errorf("tool_call events = %d, want 0 (synthetic route must not emit tool calls)", n)
+	}
+	if n := len(emitter.ToolResultEvents); n != 0 {
+		t.Errorf("tool_result events = %d, want 0 (synthetic route must not emit tool results)", n)
+	}
 }
 
 func TestRunEnvelopeGenericProjectMismatchRejected(t *testing.T) {

@@ -595,7 +595,6 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 	w.Write(respBody)
 }
 
-// isLocalhost checks if the host is localhost for determining http vs https scheme.
 // normalizeUpstreamHost lowercases the host and strips an explicit default
 // (443) port so allowlist matching is case- and default-port-insensitive.
 func normalizeUpstreamHost(host string) string {
@@ -626,6 +625,7 @@ func (p *Proxy) checkUpstreamAllowed(provider, upstream string) error {
 	return fmt.Errorf("upstream %q not in allowlist for provider %q", upstream, provider)
 }
 
+// isLocalhost checks if the host is localhost for determining http vs https scheme.
 func isLocalhost(host string) bool {
 	hostname := host
 	if h, _, err := net.SplitHostPort(host); err == nil {
