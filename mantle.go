@@ -113,6 +113,10 @@ func (p *Proxy) serveMantleForPathWithAttribution(w http.ResponseWriter, r *http
 		http.Error(w, "api token substitution failed", status)
 		return
 	}
+	if !attribution.LegacyRoute && runAttributionProjectMismatch(attribution.RunID, resolved.Project) {
+		http.Error(w, "run attribution project mismatch", http.StatusForbidden)
+		return
+	}
 	if attribution.LegacyRoute && attribution.RunID != "" && resolved.RunID != "" && resolved.RunID != attribution.RunID {
 		p.logMantlePreUpstreamError(sessionID, requestID, attribution, "", mantleRequestModel(reqBody), "unresolved_run_id", "unresolved cloud build run id", http.StatusForbidden)
 		http.Error(w, "unresolved cloud build run id", http.StatusForbidden)

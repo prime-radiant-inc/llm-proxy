@@ -269,7 +269,7 @@ func TestRequestLogContextWritesNeutralRunMetadata(t *testing.T) {
 	meta := map[string]interface{}{}
 	addRequestLogContextMeta(meta, RequestLogContext{
 		RunID:         "proj-20260628-run",
-		ResolvedRunID: "stale-box-id",
+		ResolvedRunID: "resolved-other-run-id",
 		ClientFPHash:  strings.Repeat("a", 64),
 		Project:       "proj",
 		ProviderRoute: "aws-bedrock",
@@ -279,8 +279,8 @@ func TestRequestLogContextWritesNeutralRunMetadata(t *testing.T) {
 	if got := meta["run_id"]; got != "proj-20260628-run" {
 		t.Fatalf("run_id = %v, want proj-20260628-run", got)
 	}
-	if got := meta["resolved_run_id"]; got != "stale-box-id" {
-		t.Fatalf("resolved_run_id = %v, want stale-box-id", got)
+	if got := meta["resolved_run_id"]; got != "resolved-other-run-id" {
+		t.Fatalf("resolved_run_id = %v, want resolved-other-run-id", got)
 	}
 	if _, ok := meta["cloud_build_run_id"]; ok {
 		t.Fatalf("legacy cloud_build_run_id present in neutral context: %#v", meta)

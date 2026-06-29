@@ -541,7 +541,7 @@ func TestServeHTTP_RunEnvelopeBedrockStripsPrefix(t *testing.T) {
 	proxy.bedrock.client = &http.Client{
 		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
 	}
-	proxy.tokenSub = newSub(t, writeScript(t, `printf '%s\n' '{"token":"REAL-BEARER","client_fp_hash":"`+strings.Repeat("a", 64)+`","project":"proj","run_id":"stale-box"}'`))
+	proxy.tokenSub = newSub(t, writeScript(t, `printf '%s\n' '{"token":"REAL-BEARER","client_fp_hash":"`+strings.Repeat("a", 64)+`","project":"proj","run_id":"resolved-other-run"}'`))
 
 	req := httptest.NewRequest("POST", "/runs/proj-run-1/model/anthropic.claude-3-haiku-20240307-v1:0/invoke",
 		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))
@@ -559,7 +559,7 @@ func TestServeHTTP_RunEnvelopeBedrockStripsPrefix(t *testing.T) {
 	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
 	meta := findLogEntryByType(t, entries, "request")["_meta"].(map[string]any)
 	assertMetaString(t, meta, "run_id", "proj-run-1")
-	assertMetaString(t, meta, "resolved_run_id", "stale-box")
+	assertMetaString(t, meta, "resolved_run_id", "resolved-other-run")
 	if _, ok := meta["cloud_build_run_id"]; ok {
 		t.Fatalf("legacy run metadata present: %#v", meta)
 	}
@@ -612,7 +612,7 @@ func TestServeHTTP_RunEnvelopeBedrockProjectMismatch(t *testing.T) {
 	proxy.bedrock.client = &http.Client{
 		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
 	}
-	proxy.tokenSub = newSub(t, writeScript(t, `printf '%s\n' '{"token":"REAL-BEARER","project":"proj","run_id":"stale-box"}'`))
+	proxy.tokenSub = newSub(t, writeScript(t, `printf '%s\n' '{"token":"REAL-BEARER","project":"proj","run_id":"resolved-other-run"}'`))
 
 	req := httptest.NewRequest("POST", "/runs/other-run/model/anthropic.claude-3-haiku-20240307-v1:0/invoke",
 		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))
@@ -643,7 +643,7 @@ func TestServeHTTP_RunEnvelopeBedrockEmptyProjectAllowed(t *testing.T) {
 	proxy.bedrock.client = &http.Client{
 		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
 	}
-	proxy.tokenSub = newSub(t, writeScript(t, `printf '%s\n' '{"token":"REAL-BEARER","project":"","run_id":"stale-box"}'`))
+	proxy.tokenSub = newSub(t, writeScript(t, `printf '%s\n' '{"token":"REAL-BEARER","project":"","run_id":"resolved-other-run"}'`))
 
 	req := httptest.NewRequest("POST", "/runs/other-run/model/anthropic.claude-3-haiku-20240307-v1:0/invoke",
 		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`))

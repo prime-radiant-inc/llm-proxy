@@ -67,6 +67,10 @@ type RunAttribution struct {
 	RunID string
 }
 
+func runAttributionProjectMismatch(runID, project string) bool {
+	return runID != "" && project != "" && !strings.HasPrefix(runID, project+"-")
+}
+
 // createPassthroughClient creates an HTTP client configured for true passthrough proxying
 func createPassthroughClient() *http.Client {
 	transport := &http.Transport{
@@ -427,7 +431,7 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 		setResolvedKey(proxyReq.Header, hdrName, resolved.Token)
 	}
 
-	if attribution.RunID != "" && resolved.Project != "" && !strings.HasPrefix(attribution.RunID, resolved.Project+"-") {
+	if runAttributionProjectMismatch(attribution.RunID, resolved.Project) {
 		http.Error(w, "run attribution project mismatch", http.StatusForbidden)
 		return
 	}

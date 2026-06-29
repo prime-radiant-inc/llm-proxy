@@ -231,7 +231,7 @@ func (p *Proxy) serveBedrockForPath(w http.ResponseWriter, r *http.Request, inne
 		http.Error(w, "api token substitution failed", status)
 		return
 	}
-	if attribution.RunID != "" && resolved.Project != "" && !strings.HasPrefix(attribution.RunID, resolved.Project+"-") {
+	if runAttributionProjectMismatch(attribution.RunID, resolved.Project) {
 		http.Error(w, "run attribution project mismatch", http.StatusForbidden)
 		return
 	}
@@ -382,7 +382,7 @@ func (p *Proxy) serveBedrockDiscoveryForPath(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "api token substitution failed", status)
 		return
 	}
-	if attribution.RunID != "" && resolved.Project != "" && !strings.HasPrefix(attribution.RunID, resolved.Project+"-") {
+	if runAttributionProjectMismatch(attribution.RunID, resolved.Project) {
 		http.Error(w, "run attribution project mismatch", http.StatusForbidden)
 		return
 	}
