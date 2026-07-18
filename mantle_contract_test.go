@@ -523,11 +523,14 @@ func TestServeMantleLogsUpstreamTransportErrorObservation(t *testing.T) {
 	}
 	requestMeta := entries[0]["_meta"].(map[string]any)
 	errorEntry := entries[1]
-	if got := errorEntry["type"]; got != "error" {
-		t.Fatalf("terminal entry type = %v, want error", got)
+	if got := errorEntry["type"]; got != "response" {
+		t.Fatalf("terminal entry type = %v, want response", got)
 	}
 	if got := errorEntry["status"]; got != float64(http.StatusBadGateway) {
 		t.Fatalf("terminal entry status = %v, want 502", got)
+	}
+	if got := errorEntry["termination"]; got != TerminationUpstreamUnreachable {
+		t.Fatalf("terminal entry termination = %v, want %v", got, TerminationUpstreamUnreachable)
 	}
 	errorMeta := errorEntry["_meta"].(map[string]any)
 	if got := errorMeta["request_id"]; got != requestMeta["request_id"] {
@@ -780,11 +783,14 @@ func TestServeMantleLogsStreamingReadErrorObservation(t *testing.T) {
 		t.Fatalf("log entries = %d, want 2", len(entries))
 	}
 	errorEntry := entries[1]
-	if got := errorEntry["type"]; got != "error" {
-		t.Fatalf("terminal entry type = %v, want error", got)
+	if got := errorEntry["type"]; got != "response" {
+		t.Fatalf("terminal entry type = %v, want response", got)
 	}
 	if got := errorEntry["status"]; got != float64(http.StatusOK) {
 		t.Fatalf("terminal entry status = %v, want 200", got)
+	}
+	if got := errorEntry["termination"]; got != TerminationUpstreamError {
+		t.Fatalf("terminal entry termination = %v, want %v", got, TerminationUpstreamError)
 	}
 	errorInfo := errorEntry["error"].(map[string]any)
 	if got := errorInfo["class"]; got != "upstream_stream_read_failed" {
@@ -792,6 +798,64 @@ func TestServeMantleLogsStreamingReadErrorObservation(t *testing.T) {
 	}
 	responseInfo := errorEntry["response"].(map[string]any)
 	chunks := responseInfo["chunks"].([]any)
+	if len(chunks) != 1 {
+		t.Fatalf("logged chunks = %d, want 1", len(chunks))
+	}
+}
+
+func TestMantleUpstreamStreamReadFailureEmitsResponseRecordWithTermination(t *testing.T) {
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("mock server should not be called when custom RoundTripper is installed")
+	}))
+	defer mock.Close()
+
+	counterSub, counter := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"run-test"}`)
+	proxy.tokenSub = counterSub
+	proxy.bedrock.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       &errAfterDataReadCloser{data: []byte("data: {\"type\":\"response.created\"}\n")},
+			}, nil
+		}),
+	}
+
+	req := httptest.NewRequest("POST", "/cbrun/run-test/mantle/v1/responses", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%s", w.Code, w.Body.String())
+	}
+	if readResolverCalls(t, counter) != 1 {
+		t.Fatalf("resolver calls = %d, want 1", readResolverCalls(t, counter))
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 2 {
+		t.Fatalf("log entries = %d, want 2", len(entries))
+	}
+	entry := entries[1]
+	if entry["type"] != "response" {
+		t.Fatalf("type = %v, want response — aborts must pair the request observation", entry["type"])
+	}
+	if got := entry["status"]; got != float64(http.StatusOK) {
+		t.Errorf("status = %v, want 200", got)
+	}
+	if entry["termination"] != TerminationUpstreamError {
+		t.Errorf("termination = %v, want %v", entry["termination"], TerminationUpstreamError)
+	}
+	errObj, _ := entry["error"].(map[string]any)
+	if errObj["class"] != "upstream_stream_read_failed" {
+		t.Errorf("error.class = %v", errObj["class"])
+	}
+	responseInfo, _ := entry["response"].(map[string]any)
+	chunks, _ := responseInfo["chunks"].([]any)
 	if len(chunks) != 1 {
 		t.Fatalf("logged chunks = %d, want 1", len(chunks))
 	}
@@ -835,8 +899,11 @@ func TestServeMantleLogsStreamingWriteErrorObservation(t *testing.T) {
 		t.Fatalf("log entries = %d, want 2", len(entries))
 	}
 	errorEntry := entries[1]
-	if got := errorEntry["type"]; got != "error" {
-		t.Fatalf("terminal entry type = %v, want error", got)
+	if got := errorEntry["type"]; got != "response" {
+		t.Fatalf("terminal entry type = %v, want response", got)
+	}
+	if got := errorEntry["termination"]; got != TerminationClientCancel {
+		t.Fatalf("terminal entry termination = %v, want %v", got, TerminationClientCancel)
 	}
 	errorInfo := errorEntry["error"].(map[string]any)
 	if got := errorInfo["class"]; got != "client_stream_write_failed" {

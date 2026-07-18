@@ -127,7 +127,7 @@ func (p *Proxy) serveMantleForPathWithAttribution(w http.ResponseWriter, r *http
 
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(reqBody))
 	if err != nil {
-		p.logMantleTerminalErrorObservation(sessionID, requestID, attribution, http.StatusInternalServerError, ResponseTiming{}, "request_create_failed", "failed to create upstream request", reqBody, nil)
+		p.logMantleAbortedResponseObservation(sessionID, requestID, attribution, http.StatusInternalServerError, ResponseTiming{}, TerminationUpstreamUnreachable, "request_create_failed", "failed to create upstream request", reqBody, nil)
 		http.Error(w, "failed to create request", http.StatusInternalServerError)
 		return
 	}
@@ -145,9 +145,9 @@ func (p *Proxy) serveMantleForPathWithAttribution(w http.ResponseWriter, r *http
 	startTime := time.Now()
 	resp, err := p.bedrock.client.Do(proxyReq)
 	if err != nil {
-		p.logMantleTerminalErrorObservation(sessionID, requestID, attribution, http.StatusBadGateway, ResponseTiming{
+		p.logMantleAbortedResponseObservation(sessionID, requestID, attribution, http.StatusBadGateway, ResponseTiming{
 			TotalMs: time.Since(startTime).Milliseconds(),
-		}, "upstream_request_failed", "upstream request failed", reqBody, nil)
+		}, TerminationUpstreamUnreachable, "upstream_request_failed", "upstream request failed", reqBody, nil)
 		http.Error(w, "upstream request failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -164,9 +164,9 @@ func (p *Proxy) serveMantleForPathWithAttribution(w http.ResponseWriter, r *http
 			line, readErr := reader.ReadBytes('\n')
 			if len(line) > 0 {
 				if _, writeErr := sw.Write(line); writeErr != nil {
-					p.logMantleTerminalErrorObservation(sessionID, requestID, attribution, resp.StatusCode, ResponseTiming{
+					p.logMantleAbortedResponseObservation(sessionID, requestID, attribution, resp.StatusCode, ResponseTiming{
 						TotalMs: time.Since(startTime).Milliseconds(),
-					}, "client_stream_write_failed", "client stream write failed", reqBody, sw.Chunks())
+					}, TerminationClientCancel, "client_stream_write_failed", "client stream write failed", reqBody, sw.Chunks())
 					return
 				}
 				sw.Flush()
@@ -175,9 +175,9 @@ func (p *Proxy) serveMantleForPathWithAttribution(w http.ResponseWriter, r *http
 				if readErr == io.EOF {
 					break
 				}
-				p.logMantleTerminalErrorObservation(sessionID, requestID, attribution, resp.StatusCode, ResponseTiming{
+				p.logMantleAbortedResponseObservation(sessionID, requestID, attribution, resp.StatusCode, ResponseTiming{
 					TotalMs: time.Since(startTime).Milliseconds(),
-				}, "upstream_stream_read_failed", "upstream stream read failed", reqBody, sw.Chunks())
+				}, TerminationUpstreamError, "upstream_stream_read_failed", "upstream stream read failed", reqBody, sw.Chunks())
 				return
 			}
 		}
@@ -408,33 +408,40 @@ func (p *Proxy) logMantleResponseObservation(sessionID, requestID string, attrib
 	}
 
 	entry := map[string]any{
-		"type":     "response",
-		"status":   status,
-		"timing":   timing,
-		"_meta":    p.newMantleMeta(sessionID, requestID, attribution, model),
-		"response": response,
+		"type":        "response",
+		"status":      status,
+		"timing":      timing,
+		"termination": TerminationEOF,
+		"_meta":       p.newMantleMeta(sessionID, requestID, attribution, model),
+		"response":    response,
 	}
 	p.writeMantleObservation(sessionID, entry)
 }
 
-func (p *Proxy) logMantleTerminalErrorObservation(sessionID, requestID string, attribution mantleAttribution, status int, timing ResponseTiming, class, message string, reqBody []byte, chunks []StreamChunk) {
+// logMantleAbortedResponseObservation pairs the request observation when the
+// relay aborted after the upstream call began. The captured chunks may carry
+// the usage-bearing terminal event, so this is a response record — with a
+// termination and the error class — not a bare error record.
+func (p *Proxy) logMantleAbortedResponseObservation(sessionID, requestID string, attribution mantleAttribution, status int, timing ResponseTiming, termination, class, message string, reqBody []byte, chunks []StreamChunk) {
 	model := mantleRequestModel(reqBody)
+	response := map[string]any{}
+	if len(chunks) > 0 {
+		response["chunks"] = chunks
+		if body := mantleResponseBodyFromStream(chunks); body != nil {
+			response["body"] = body
+		}
+	}
 	entry := map[string]any{
-		"type":   "error",
-		"status": status,
-		"timing": timing,
-		"_meta":  p.newMantleMeta(sessionID, requestID, attribution, model),
+		"type":        "response",
+		"status":      status,
+		"timing":      timing,
+		"termination": termination,
+		"_meta":       p.newMantleMeta(sessionID, requestID, attribution, model),
 		"error": map[string]any{
 			"class":   class,
 			"message": message,
 		},
-	}
-	if len(chunks) > 0 {
-		response := map[string]any{"chunks": chunks}
-		if body := mantleResponseBodyFromStream(chunks); body != nil {
-			response["body"] = body
-		}
-		entry["response"] = response
+		"response": response,
 	}
 	p.writeMantleObservation(sessionID, entry)
 }
