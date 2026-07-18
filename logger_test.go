@@ -118,7 +118,7 @@ func TestLoggerResponseWithTiming(t *testing.T) {
 		TotalMs: 1200,
 	}
 
-	err = logger.LogResponse(sessionID, provider, 1, 200, http.Header{}, []byte(`{"response":"ok"}`), nil, timing, "test-request-id")
+	err = logger.LogResponse(sessionID, provider, 1, 200, http.Header{}, []byte(`{"response":"ok"}`), nil, timing, "test-request-id", ResponseCapture{Termination: TerminationEOF})
 	if err != nil {
 		t.Fatalf("Failed to log response: %v", err)
 	}

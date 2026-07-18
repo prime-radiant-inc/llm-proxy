@@ -1044,8 +1044,8 @@ func (pc *providerCapture) LogRequest(sessionID, provider string, seq int, metho
 	*pc.capturedProvider = provider
 	return pc.inner.LogRequest(sessionID, provider, seq, method, path, headers, body, requestID)
 }
-func (pc *providerCapture) LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string) error {
-	return pc.inner.LogResponse(sessionID, provider, seq, status, headers, body, chunks, timing, requestID)
+func (pc *providerCapture) LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string, capture ResponseCapture) error {
+	return pc.inner.LogResponse(sessionID, provider, seq, status, headers, body, chunks, timing, requestID, capture)
 }
 func (pc *providerCapture) LogObservation(sessionID, provider string, entry map[string]any) error {
 	return pc.inner.LogObservation(sessionID, provider, entry)

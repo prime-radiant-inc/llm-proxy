@@ -162,7 +162,7 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, logger ProxyLogg
 			TTFBMs:  ttfb,
 			TotalMs: time.Since(startTime).Milliseconds(),
 		}
-		logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, sw.chunks, timing, requestID)
+		logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, sw.chunks, timing, requestID, ResponseCapture{Termination: TerminationEOF})
 	}
 
 	// Emit agent observability events for streaming responses

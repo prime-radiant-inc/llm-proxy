@@ -23,6 +23,7 @@ type mockFileLogger struct {
 	forkCalls             []forkCall
 	closeCalls            int
 	closeError            error
+	lastCapture           ResponseCapture
 
 	// Configurable errors for testing error propagation
 	sessionStartError error
@@ -103,10 +104,11 @@ func (m *mockFileLogger) LogRequest(sessionID, provider string, seq int, method,
 	return m.requestError
 }
 
-func (m *mockFileLogger) LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string) error {
+func (m *mockFileLogger) LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string, capture ResponseCapture) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.responseCalls = append(m.responseCalls, responseCall{sessionID, provider, seq, status, headers, body, chunks, timing, requestID})
+	m.lastCapture = capture
 	return m.responseError
 }
 
@@ -324,7 +326,7 @@ func TestMultiWriter_LogResponse_BothCalled(t *testing.T) {
 	timing := ResponseTiming{TTFBMs: 100, TotalMs: 200}
 	requestID := "req-123"
 
-	err := mw.LogResponse(sessionID, provider, seq, status, headers, body, nil, timing, requestID)
+	err := mw.LogResponse(sessionID, provider, seq, status, headers, body, nil, timing, requestID, ResponseCapture{Termination: TerminationEOF})
 	if err != nil {
 		t.Fatalf("LogResponse returned error: %v", err)
 	}
@@ -419,7 +421,7 @@ func TestMultiWriter_NilLoki_NoError(t *testing.T) {
 		t.Errorf("LogRequest with nil Loki returned error: %v", err)
 	}
 
-	err = mw.LogResponse(sessionID, provider, 1, 200, nil, []byte(`{}`), nil, ResponseTiming{}, "req-1")
+	err = mw.LogResponse(sessionID, provider, 1, 200, nil, []byte(`{}`), nil, ResponseTiming{}, "req-1", ResponseCapture{Termination: TerminationEOF})
 	if err != nil {
 		t.Errorf("LogResponse with nil Loki returned error: %v", err)
 	}
@@ -481,7 +483,7 @@ func TestMultiWriter_FileError_Returned(t *testing.T) {
 
 	// Test LogResponse error propagation
 	fileLogger.responseError = expectedErr
-	err = mw.LogResponse(sessionID, provider, 1, 200, nil, []byte(`{}`), nil, ResponseTiming{}, "req-1")
+	err = mw.LogResponse(sessionID, provider, 1, 200, nil, []byte(`{}`), nil, ResponseTiming{}, "req-1", ResponseCapture{Termination: TerminationEOF})
 	if err != expectedErr {
 		t.Errorf("LogResponse: expected error %v, got %v", expectedErr, err)
 	}
@@ -596,7 +598,7 @@ func TestMultiWriter_LogResponse_WithChunks(t *testing.T) {
 	timing := ResponseTiming{TTFBMs: 50, TotalMs: 150}
 	requestID := "req-123"
 
-	err := mw.LogResponse(sessionID, provider, seq, status, headers, nil, chunks, timing, requestID)
+	err := mw.LogResponse(sessionID, provider, seq, status, headers, nil, chunks, timing, requestID, ResponseCapture{Termination: TerminationEOF})
 	if err != nil {
 		t.Fatalf("LogResponse returned error: %v", err)
 	}

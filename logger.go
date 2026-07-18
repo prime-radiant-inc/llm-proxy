@@ -243,7 +243,7 @@ func (l *Logger) LogRequest(sessionID, provider string, seq int, method, path st
 	return l.writeEntry(sessionID, entry)
 }
 
-func (l *Logger) LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string) error {
+func (l *Logger) LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string, capture ResponseCapture) error {
 	upstream := l.upstreams[sessionID]
 	meta := map[string]interface{}{
 		"ts":         time.Now().UTC().Format(time.RFC3339Nano),
@@ -268,6 +268,21 @@ func (l *Logger) LogResponse(sessionID, provider string, seq int, status int, he
 		entry["chunks"] = chunks
 	} else {
 		entry["body"] = string(body)
+	}
+
+	entry["upstream"] = upstream
+	entry["capture_version"] = CaptureVersion
+	if mp := meteringProviderFromUpstream(upstream); mp != "" {
+		entry["metering_provider"] = mp
+	}
+	if capture.Path != "" {
+		entry["path"] = capture.Path
+	}
+	if capture.Termination != "" {
+		entry["termination"] = capture.Termination
+	}
+	if capture.TerminationError != "" {
+		entry["termination_error"] = capture.TerminationError
 	}
 
 	return l.writeEntry(sessionID, entry)

@@ -47,7 +47,7 @@ type ProxyLogger interface {
 	RegisterUpstream(sessionID, upstream string)
 	LogSessionStart(sessionID, provider, upstream string) error
 	LogRequest(sessionID, provider string, seq int, method, path string, headers http.Header, body []byte, requestID string) error
-	LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string) error
+	LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string, capture ResponseCapture) error
 	LogObservation(sessionID, provider string, entry map[string]any) error
 	LogFork(sessionID, provider string, fromSeq int, parentSession string) error
 	Close() error
@@ -576,7 +576,7 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 		// Decode gzip/etc before logging so JSONL body is readable JSON (PRI-1800).
 		// The forwarded response below uses the original, untouched bytes.
 		logBody := decodeBodyForLogging(respBody, resp.Header)
-		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, logBody, nil, timing, requestID)
+		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, logBody, nil, timing, requestID, ResponseCapture{Path: path, Termination: TerminationEOF})
 
 		// Emit agent observability events
 		if p.eventEmitter != nil && patternState != nil {

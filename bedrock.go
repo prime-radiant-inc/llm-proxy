@@ -335,7 +335,7 @@ func (p *Proxy) serveBedrockForPath(w http.ResponseWriter, r *http.Request, inne
 				TTFBMs:  time.Since(startTime).Milliseconds(),
 				TotalMs: time.Since(startTime).Milliseconds(),
 			}
-			p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, errBody, nil, timing, requestID)
+			p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, errBody, nil, timing, requestID, ResponseCapture{Path: innerPath, Termination: TerminationEOF})
 		}
 
 		copyHeaders(w.Header(), resp.Header)
@@ -345,9 +345,9 @@ func (p *Proxy) serveBedrockForPath(w http.ResponseWriter, r *http.Request, inne
 	}
 
 	if streaming {
-		p.serveBedrockStreaming(w, resp, startTime, modelID, upstream, provider, sessionID, seq, reqBody, requestID, patternState, shouldLog)
+		p.serveBedrockStreaming(w, resp, startTime, modelID, upstream, provider, sessionID, seq, reqBody, requestID, innerPath, patternState, shouldLog)
 	} else {
-		p.serveBedrockNonStreaming(w, resp, startTime, modelID, upstream, provider, sessionID, seq, reqBody, requestID, patternState, shouldLog)
+		p.serveBedrockNonStreaming(w, resp, startTime, modelID, upstream, provider, sessionID, seq, reqBody, requestID, innerPath, patternState, shouldLog)
 	}
 }
 
@@ -420,7 +420,7 @@ func (p *Proxy) serveBedrockDiscoveryForPath(w http.ResponseWriter, r *http.Requ
 }
 
 // serveBedrockStreaming handles streaming Bedrock responses using buffer-then-decode.
-func (p *Proxy) serveBedrockStreaming(w http.ResponseWriter, resp *http.Response, startTime time.Time, modelID, upstream, provider, sessionID string, seq int, reqBody []byte, requestID string, patternState *PatternState, shouldLog bool) {
+func (p *Proxy) serveBedrockStreaming(w http.ResponseWriter, resp *http.Response, startTime time.Time, modelID, upstream, provider, sessionID string, seq int, reqBody []byte, requestID, path string, patternState *PatternState, shouldLog bool) {
 	// Set up TeeReader with LimitedWriter for observability buffer
 	observeBuf := bytes.NewBuffer(make([]byte, 0, bedrockMaxBuffer))
 	limitedW := &LimitedWriter{W: observeBuf, N: int64(bedrockMaxBuffer)}
@@ -463,7 +463,7 @@ func (p *Proxy) serveBedrockStreaming(w http.ResponseWriter, resp *http.Response
 			TTFBMs:  ttfb.Milliseconds(),
 			TotalMs: totalTime.Milliseconds(),
 		}
-		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, chunks, timing, requestID)
+		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, chunks, timing, requestID, ResponseCapture{Path: path, Termination: TerminationEOF})
 
 		// Emit agent observability events
 		if p.eventEmitter != nil && patternState != nil && p.sessionManager != nil && len(chunks) > 0 {
@@ -474,7 +474,7 @@ func (p *Proxy) serveBedrockStreaming(w http.ResponseWriter, resp *http.Response
 }
 
 // serveBedrockNonStreaming handles non-streaming Bedrock responses (/invoke).
-func (p *Proxy) serveBedrockNonStreaming(w http.ResponseWriter, resp *http.Response, startTime time.Time, modelID, upstream, provider, sessionID string, seq int, reqBody []byte, requestID string, patternState *PatternState, shouldLog bool) {
+func (p *Proxy) serveBedrockNonStreaming(w http.ResponseWriter, resp *http.Response, startTime time.Time, modelID, upstream, provider, sessionID string, seq int, reqBody []byte, requestID, path string, patternState *PatternState, shouldLog bool) {
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, bedrockMaxRequestBody))
 	if err != nil {
 		http.Error(w, "failed to read response body", http.StatusBadGateway)
@@ -488,7 +488,7 @@ func (p *Proxy) serveBedrockNonStreaming(w http.ResponseWriter, resp *http.Respo
 			TTFBMs:  totalTime.Milliseconds(),
 			TotalMs: totalTime.Milliseconds(),
 		}
-		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, respBody, nil, timing, requestID)
+		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, respBody, nil, timing, requestID, ResponseCapture{Path: path, Termination: TerminationEOF})
 
 		if p.eventEmitter != nil && patternState != nil {
 			parsed := ParseResponseBody(string(respBody), upstream)

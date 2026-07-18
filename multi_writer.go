@@ -218,8 +218,8 @@ func (m *MultiWriter) LogRequest(sessionID, provider string, seq int, method, pa
 
 // LogResponse logs a response to both destinations.
 // File errors are returned; Loki errors are logged but don't fail.
-func (m *MultiWriter) LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string) error {
-	err := m.file.LogResponse(sessionID, provider, seq, status, headers, body, chunks, timing, requestID)
+func (m *MultiWriter) LogResponse(sessionID, provider string, seq int, status int, headers http.Header, body []byte, chunks []StreamChunk, timing ResponseTiming, requestID string, capture ResponseCapture) error {
+	err := m.file.LogResponse(sessionID, provider, seq, status, headers, body, chunks, timing, requestID, capture)
 
 	if m.loki != nil {
 		meta := map[string]interface{}{
@@ -244,6 +244,24 @@ func (m *MultiWriter) LogResponse(sessionID, provider string, seq int, status in
 			entry["chunks"] = chunks
 		} else {
 			entry["body"] = string(body)
+		}
+
+		if up, ok := m.upstreams.Load(sessionID); ok {
+			upstream, _ := up.(string)
+			entry["upstream"] = upstream
+			entry["capture_version"] = CaptureVersion
+			if mp := meteringProviderFromUpstream(upstream); mp != "" {
+				entry["metering_provider"] = mp
+			}
+		}
+		if capture.Path != "" {
+			entry["path"] = capture.Path
+		}
+		if capture.Termination != "" {
+			entry["termination"] = capture.Termination
+		}
+		if capture.TerminationError != "" {
+			entry["termination_error"] = capture.TerminationError
 		}
 
 		m.loki.Push(entry, provider)
