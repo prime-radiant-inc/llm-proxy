@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -278,4 +279,90 @@ func (t *errorBodyTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 
 	return resp, nil
+}
+
+// filterResponseEntries returns only the "response"-typed observation log entries.
+func filterResponseEntries(entries []map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, entry := range entries {
+		if entryType, _ := entry["type"].(string); entryType == "response" {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func TestServeBedrockPairsRequestCreationFailureWithResponseRecord(t *testing.T) {
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("mock server should not be called when the outbound request cannot be created")
+	}))
+	defer mock.Close()
+
+	req := httptest.NewRequest("POST", "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/invoke",
+		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	// Not a valid HTTP token (contains a space) — http.NewRequestWithContext rejects
+	// it, exercising the same failure mode as a malformed outbound request.
+	req.Method = "IN VALID"
+
+	w := httptest.NewRecorder()
+	proxy.serveBedrock(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500. body=%s", w.Code, w.Body.String())
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	responseEntries := filterResponseEntries(entries)
+	if len(responseEntries) != 1 {
+		t.Fatalf("expected exactly 1 response entry, got %d: %v", len(responseEntries), responseEntries)
+	}
+	if got := responseEntries[0]["termination"]; got != TerminationUpstreamUnreachable {
+		t.Errorf("termination = %v, want %v", got, TerminationUpstreamUnreachable)
+	}
+	if got := responseEntries[0]["status"]; got != float64(0) {
+		t.Errorf("status = %v, want 0", got)
+	}
+	if _, present := responseEntries[0]["termination_error"]; !present {
+		t.Errorf("termination_error should be present")
+	}
+}
+
+func TestServeBedrockPairsUpstreamUnreachableWithResponseRecord(t *testing.T) {
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("mock server should not be called when custom RoundTripper is installed")
+	}))
+	defer mock.Close()
+
+	proxy.bedrock.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, errors.New("dial boom")
+		}),
+	}
+
+	req := httptest.NewRequest("POST", "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/invoke",
+		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	proxy.serveBedrock(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502. body=%s", w.Code, w.Body.String())
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	responseEntries := filterResponseEntries(entries)
+	if len(responseEntries) != 1 {
+		t.Fatalf("expected exactly 1 response entry, got %d: %v", len(responseEntries), responseEntries)
+	}
+	if got := responseEntries[0]["termination"]; got != TerminationUpstreamUnreachable {
+		t.Errorf("termination = %v, want %v", got, TerminationUpstreamUnreachable)
+	}
+	if got := responseEntries[0]["status"]; got != float64(0) {
+		t.Errorf("status = %v, want 0", got)
+	}
+	if _, present := responseEntries[0]["termination_error"]; !present {
+		t.Errorf("termination_error should be present")
+	}
 }

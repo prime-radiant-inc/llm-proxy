@@ -304,6 +304,16 @@ func (p *Proxy) serveBedrockForPath(w http.ResponseWriter, r *http.Request, inne
 	// Create the upstream request
 	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, bytes.NewReader(reqBody))
 	if err != nil {
+		if shouldLog {
+			// Pair the already-logged request line: no response bytes existed,
+			// so this is bookkeeping (status 0), not money.
+			timing := ResponseTiming{TotalMs: time.Since(startTime).Milliseconds()}
+			p.logger.LogResponse(sessionID, provider, seq, 0, nil, nil, nil, timing, requestID, ResponseCapture{
+				Path:             innerPath,
+				Termination:      TerminationUpstreamUnreachable,
+				TerminationError: err.Error(),
+			})
+		}
 		http.Error(w, "failed to create request", http.StatusInternalServerError)
 		return
 	}
@@ -321,6 +331,16 @@ func (p *Proxy) serveBedrockForPath(w http.ResponseWriter, r *http.Request, inne
 	// Send to Bedrock
 	resp, err := p.bedrock.client.Do(proxyReq)
 	if err != nil {
+		if shouldLog {
+			// Pair the already-logged request line: no response bytes existed,
+			// so this is bookkeeping (status 0), not money.
+			timing := ResponseTiming{TotalMs: time.Since(startTime).Milliseconds()}
+			p.logger.LogResponse(sessionID, provider, seq, 0, nil, nil, nil, timing, requestID, ResponseCapture{
+				Path:             innerPath,
+				Termination:      TerminationUpstreamUnreachable,
+				TerminationError: err.Error(),
+			})
+		}
 		http.Error(w, "upstream request failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
