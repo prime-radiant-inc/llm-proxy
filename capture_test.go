@@ -124,8 +124,9 @@ func TestLogResponseStampsCaptureFacts(t *testing.T) {
 }
 
 func TestBedrockLegsStampTerminationEOF(t *testing.T) {
-	// Test three Bedrock relay paths: (a) non-2xx error, (b) non-streaming 200, (c) streaming 200.
-	// Each must log exactly one response with Termination=TerminationEOF and a non-empty Path.
+	// Test four Bedrock relay paths: (a) non-2xx error, (b) non-streaming 200,
+	// (c) streaming 200, (d) non-streaming with io.ReadAll error.
+	// Each must log exactly one response with termination stamped and a non-empty Path.
 
 	fixtureData, err := os.ReadFile("testdata/bedrock-eventstream.bin")
 	if err != nil {
@@ -133,9 +134,10 @@ func TestBedrockLegsStampTerminationEOF(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name    string
-		path    string
-		handler http.HandlerFunc
+		name            string
+		path            string
+		handler         http.HandlerFunc
+		wantTermination string
 	}{
 		{
 			name: "non-200 error",
@@ -145,6 +147,7 @@ func TestBedrockLegsStampTerminationEOF(t *testing.T) {
 				w.WriteHeader(http.StatusTooManyRequests)
 				w.Write([]byte(`{"message":"Rate limit exceeded"}`))
 			}),
+			wantTermination: "eof",
 		},
 		{
 			name: "non-streaming 200",
@@ -154,6 +157,7 @@ func TestBedrockLegsStampTerminationEOF(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 				w.Write([]byte(`{"id":"msg_123","type":"message","role":"assistant","content":[{"type":"text","text":"Hi"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`))
 			}),
+			wantTermination: "eof",
 		},
 		{
 			name: "streaming 200",
@@ -163,19 +167,35 @@ func TestBedrockLegsStampTerminationEOF(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 				w.Write(fixtureData)
 			}),
+			wantTermination: "eof",
+		},
+		{
+			name: "non-streaming 200 with ReadAll error",
+			path: "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/invoke",
+			handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(`{"id":"msg_123","type":"message","role":"assistant","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+			}),
+			wantTermination: "upstream_error",
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// newTestBedrockProxy is defined in bedrock_test.go
 			proxy, mock := newTestBedrockProxy(t, tc.handler)
 			defer mock.Close()
 
-			// Redirect mock Bedrock requests to our test server
+			// Set up the transport; for the error case, inject a failing body
 			mockHost := strings.TrimPrefix(mock.URL, "http://")
-			proxy.bedrock.client = &http.Client{
-				Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+			if tc.name == "non-streaming 200 with ReadAll error" {
+				proxy.bedrock.client = &http.Client{
+					Transport: &errorBodyTransport{target: mockHost, inner: http.DefaultTransport},
+				}
+			} else {
+				proxy.bedrock.client = &http.Client{
+					Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+				}
 			}
 
 			// Make request through proxy
@@ -190,22 +210,24 @@ func TestBedrockLegsStampTerminationEOF(t *testing.T) {
 			logger := proxy.logger.(*Logger)
 			entries := readObservationLogEntries(t, logger)
 
-			// Find the response entry (should be second after session_start + request)
-			var responseEntry map[string]any
+			// Count and collect response entries
+			var responseEntries []map[string]any
 			for _, entry := range entries {
 				if entryType, _ := entry["type"].(string); entryType == "response" {
-					responseEntry = entry
-					break
+					responseEntries = append(responseEntries, entry)
 				}
 			}
 
-			if responseEntry == nil {
-				t.Fatalf("response entry not found in logs, entries: %v", entries)
+			// Assert exactly one response entry per request
+			if len(responseEntries) != 1 {
+				t.Fatalf("expected exactly 1 response entry, got %d: %v", len(responseEntries), responseEntries)
 			}
 
-			// Verify termination=eof
-			if got := responseEntry["termination"]; got != "eof" {
-				t.Errorf("termination = %q, want eof", got)
+			responseEntry := responseEntries[0]
+
+			// Verify termination as expected
+			if got := responseEntry["termination"]; got != tc.wantTermination {
+				t.Errorf("termination = %q, want %q", got, tc.wantTermination)
 			}
 
 			// Verify path is set
@@ -215,10 +237,45 @@ func TestBedrockLegsStampTerminationEOF(t *testing.T) {
 				t.Errorf("path = %q, want %q", got, tc.path)
 			}
 
-			// Verify no termination_error on eof
-			if _, present := responseEntry["termination_error"]; present {
-				t.Errorf("termination_error should be omitted on eof")
+			// Verify termination_error only on upstream_error
+			if tc.wantTermination == "upstream_error" {
+				if _, present := responseEntry["termination_error"]; !present {
+					t.Errorf("termination_error should be present on upstream_error")
+				}
+			} else {
+				if _, present := responseEntry["termination_error"]; present {
+					t.Errorf("termination_error should be omitted on %s", tc.wantTermination)
+				}
 			}
 		})
 	}
+}
+
+// errorBodyTransport is like rewriteTransport but injects a failing response body.
+type errorBodyTransport struct {
+	target string
+	inner  http.RoundTripper
+}
+
+func (t *errorBodyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.URL.Scheme = "http"
+	req.URL.Host = t.target
+	req.Host = t.target
+
+	resp, err := t.inner.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+
+	// Replace the body with one that fails after first read
+	originalBody := resp.Body
+	resp.Body = &errAfterDataReadCloser{
+		data: []byte(`partial`),
+	}
+	if originalBody != nil {
+		originalBody.Close()
+	}
+
+	return resp, nil
 }

@@ -476,19 +476,19 @@ func (p *Proxy) serveBedrockStreaming(w http.ResponseWriter, resp *http.Response
 // serveBedrockNonStreaming handles non-streaming Bedrock responses (/invoke).
 func (p *Proxy) serveBedrockNonStreaming(w http.ResponseWriter, resp *http.Response, startTime time.Time, modelID, upstream, provider, sessionID string, seq int, reqBody []byte, requestID, path string, patternState *PatternState, shouldLog bool) {
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, bedrockMaxRequestBody))
+	totalTime := time.Since(startTime)
+
 	if err != nil {
 		if shouldLog {
 			timing := ResponseTiming{
-				TTFBMs:  time.Since(startTime).Milliseconds(),
-				TotalMs: time.Since(startTime).Milliseconds(),
+				TTFBMs:  totalTime.Milliseconds(),
+				TotalMs: totalTime.Milliseconds(),
 			}
-			p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, nil, timing, requestID, ResponseCapture{Path: path, Termination: TerminationUpstreamError})
+			p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, nil, timing, requestID, ResponseCapture{Path: path, Termination: TerminationUpstreamError, TerminationError: err.Error()})
 		}
 		http.Error(w, "failed to read response body", http.StatusBadGateway)
 		return
 	}
-
-	totalTime := time.Since(startTime)
 
 	if shouldLog {
 		timing := ResponseTiming{
