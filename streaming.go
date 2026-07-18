@@ -128,8 +128,11 @@ func extractDeltaText(data []byte, provider string) string {
 	return ""
 }
 
-// streamResponse handles streaming responses from upstream
-func streamResponse(w http.ResponseWriter, resp *http.Response, logger ProxyLogger, sm *SessionManager, sessionID, provider string, seq int, startTime time.Time, reqBody []byte, requestID string, emitter AgentEventEmitter, machineID string, patternState *PatternState) error {
+// streamResponse handles streaming responses from upstream. The capture
+// invariant: if any response bytes were relayed, a response record is logged
+// — on clean EOF and on every error path alike, because an aborted stream's
+// captured chunks still carry the usage-bearing terminal event.
+func streamResponse(w http.ResponseWriter, resp *http.Response, logger ProxyLogger, sm *SessionManager, sessionID, provider string, seq int, startTime time.Time, reqBody []byte, requestID, path string, emitter AgentEventEmitter, machineID string, patternState *PatternState) error {
 	sw := NewStreamingResponseWriter(w, provider)
 
 	// Copy headers
@@ -137,6 +140,7 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, logger ProxyLogg
 	w.WriteHeader(resp.StatusCode)
 
 	// Stream the response
+	var readErr error
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -145,14 +149,23 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, logger ProxyLogg
 			sw.Flush()
 		}
 		if err != nil {
-			if err == io.EOF {
-				break
+			if err != io.EOF {
+				readErr = err
 			}
-			return err
+			break
 		}
 	}
 
-	// Log the complete streaming response
+	termination := TerminationEOF
+	if readErr != nil {
+		termination = TerminationUpstreamError
+		if resp.Request != nil && resp.Request.Context().Err() != nil {
+			// The outbound request rides the inbound request's context, so a
+			// canceled context means the client hung up on us.
+			termination = TerminationClientCancel
+		}
+	}
+
 	if logger != nil {
 		ttfb := int64(0)
 		if len(sw.chunks) > 0 {
@@ -162,19 +175,20 @@ func streamResponse(w http.ResponseWriter, resp *http.Response, logger ProxyLogg
 			TTFBMs:  ttfb,
 			TotalMs: time.Since(startTime).Milliseconds(),
 		}
-		logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, sw.chunks, timing, requestID, ResponseCapture{Termination: TerminationEOF})
+		capture := ResponseCapture{Path: path, Termination: termination}
+		if readErr != nil {
+			capture.TerminationError = readErr.Error()
+		}
+		logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, sw.chunks, timing, requestID, capture)
 	}
 
-	// Emit agent observability events for streaming responses
-	if emitter != nil && patternState != nil && sm != nil {
-		// Parse the accumulated streaming response
+	// Agent observability events keep clean-EOF-only semantics.
+	if termination == TerminationEOF && emitter != nil && patternState != nil && sm != nil {
 		parsed := ParseStreamingResponse(sw.chunks)
-
-		// Use shared event emission logic
 		emitResponseEvents(emitter, sm, sessionID, provider, machineID, patternState, parsed.Content, parsed.Usage, parsed.StopReason, resp.StatusCode, "")
 	}
 
-	return nil
+	return readErr
 }
 
 // escapeJSON escapes special characters for JSON string embedding

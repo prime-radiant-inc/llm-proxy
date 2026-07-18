@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -549,7 +550,9 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 			loggerForStream = p.logger
 			smForStream = p.sessionManager
 		}
-		streamResponse(w, resp, loggerForStream, smForStream, sessionID, provider, seq, startTime, reqBody, requestID, p.eventEmitter, p.machineID, patternState)
+		if err := streamResponse(w, resp, loggerForStream, smForStream, sessionID, provider, seq, startTime, reqBody, requestID, path, p.eventEmitter, p.machineID, patternState); err != nil {
+			log.Printf("streamResponse %s %s: %v", requestID, path, err)
+		}
 		return
 	}
 
