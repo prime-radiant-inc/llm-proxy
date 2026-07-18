@@ -537,6 +537,16 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 	// Make request to upstream
 	resp, err := p.client.Do(proxyReq)
 	if err != nil {
+		if shouldLog {
+			// Pair the already-logged request line: no response bytes existed,
+			// so this is bookkeeping (status 0), not money.
+			timing := ResponseTiming{TotalMs: time.Since(startTime).Milliseconds()}
+			p.logger.LogResponse(sessionID, provider, seq, 0, nil, nil, nil, timing, requestID, ResponseCapture{
+				Path:             path,
+				Termination:      TerminationUpstreamUnreachable,
+				TerminationError: err.Error(),
+			})
+		}
 		http.Error(w, "upstream request failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -563,6 +573,18 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 	// Buffer response body for logging
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if shouldLog {
+			termination := TerminationUpstreamError
+			if resp.Request != nil && resp.Request.Context().Err() != nil {
+				termination = TerminationClientCancel
+			}
+			timing := ResponseTiming{TTFBMs: ttfb.Milliseconds(), TotalMs: time.Since(startTime).Milliseconds()}
+			p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, nil, timing, requestID, ResponseCapture{
+				Path:             path,
+				Termination:      termination,
+				TerminationError: err.Error(),
+			})
+		}
 		http.Error(w, "failed to read response body: "+err.Error(), http.StatusBadGateway)
 		return
 	}

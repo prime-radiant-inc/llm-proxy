@@ -256,3 +256,35 @@ func TestStreamResponseClientCancelEmitsNoAgentEvents(t *testing.T) {
 		t.Errorf("agent events on a canceled stream = %d, want 0 (emission stays clean-EOF-only)", calls)
 	}
 }
+
+func TestUpstreamUnreachableLogsResponseLine(t *testing.T) {
+	// Reserve a port and close the listener so the dial reliably fails.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadHost := strings.TrimPrefix(dead.URL, "http://")
+	dead.Close()
+
+	logger := &captureProxyLogger{}
+	p := NewProxyWithSessionManagerAndLogger(logger, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/"+deadHost+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
+	}
+	got := logger.captured()
+	if len(got) != 1 {
+		t.Fatalf("captured %d response records, want 1 — a dial failure must pair the request line", len(got))
+	}
+	rec := got[0]
+	if rec.status != 0 {
+		t.Errorf("status = %d, want 0 (no upstream response existed)", rec.status)
+	}
+	if rec.capture.Termination != TerminationUpstreamUnreachable {
+		t.Errorf("termination = %q, want %q", rec.capture.Termination, TerminationUpstreamUnreachable)
+	}
+	if rec.capture.TerminationError == "" {
+		t.Errorf("termination_error should carry the dial error")
+	}
+}
