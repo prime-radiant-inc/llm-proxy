@@ -40,6 +40,10 @@ type MultiWriter struct {
 	// requestContexts stores per-request metadata keyed by requestID.
 	// Set by serveBedrock before logging; consumed by LogRequest/LogResponse.
 	requestContexts sync.Map
+
+	// upstreams mirrors the file logger's session→upstream registration so the
+	// Loki-side entries can stamp the same capture facts.
+	upstreams sync.Map
 }
 
 // NewMultiWriter creates a new MultiWriter that writes to both the file logger
@@ -134,15 +138,18 @@ func getMachineIDForMultiWriter() string {
 	return username + "@" + hostname
 }
 
-// RegisterUpstream delegates to the file logger.
-// Loki doesn't need upstream registration since it extracts from log entries.
+// RegisterUpstream records the upstream for capture-fact stamping on the
+// Loki side and delegates to the file logger.
 func (m *MultiWriter) RegisterUpstream(sessionID, upstream string) {
+	m.upstreams.Store(sessionID, upstream)
 	m.file.RegisterUpstream(sessionID, upstream)
 }
 
 // LogSessionStart logs a session start to both destinations.
 // File errors are returned; Loki errors are logged but don't fail.
 func (m *MultiWriter) LogSessionStart(sessionID, provider, upstream string) error {
+	m.upstreams.Store(sessionID, upstream)
+
 	err := m.file.LogSessionStart(sessionID, provider, upstream)
 
 	if m.loki != nil {
@@ -193,6 +200,16 @@ func (m *MultiWriter) LogRequest(sessionID, provider string, seq int, method, pa
 			"request_sha": bodySHA,
 			"_meta":       meta,
 		}
+
+		if up, ok := m.upstreams.Load(sessionID); ok {
+			upstream, _ := up.(string)
+			entry["upstream"] = upstream
+			entry["capture_version"] = CaptureVersion
+			if mp := meteringProviderFromUpstream(upstream); mp != "" {
+				entry["metering_provider"] = mp
+			}
+		}
+
 		m.loki.Push(entry, provider)
 	}
 

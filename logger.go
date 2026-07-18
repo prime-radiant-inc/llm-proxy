@@ -235,6 +235,11 @@ func (l *Logger) LogRequest(sessionID, provider string, seq int, method, path st
 		"size":    len(body),
 		"_meta":   meta,
 	}
+	entry["upstream"] = upstream
+	entry["capture_version"] = CaptureVersion
+	if mp := meteringProviderFromUpstream(upstream); mp != "" {
+		entry["metering_provider"] = mp
+	}
 	return l.writeEntry(sessionID, entry)
 }
 
