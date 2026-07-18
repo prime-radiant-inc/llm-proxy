@@ -1236,6 +1236,119 @@ func TestServeMantleLogsStreamingObservationWithUsage(t *testing.T) {
 	}
 }
 
+// TestServeMantleResponseObservationStampsCaptureFacts covers the success
+// path builder (logMantleResponseObservation): the bastion's ingest door
+// meters top-level fields only, so a mantle response record must carry the
+// same path/upstream/metering_provider/capture_version stamps every other
+// response line carries (see logger.go LogResponse), not just the nested
+// response.body/response.chunks payload.
+func TestServeMantleResponseObservationStampsCaptureFacts(t *testing.T) {
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"resp_123","object":"response","output":[],"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}`))
+	}))
+	defer mock.Close()
+
+	counterSub, _ := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"run-test"}`)
+	proxy.tokenSub = counterSub
+
+	mockHost := strings.TrimPrefix(mock.URL, "http://")
+	proxy.bedrock.client = &http.Client{
+		Transport: &rewriteTransport{target: mockHost, inner: http.DefaultTransport},
+	}
+
+	req := httptest.NewRequest("POST", "/cbrun/run-test/mantle/v1/responses", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%s", w.Code, w.Body.String())
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 2 {
+		t.Fatalf("log entries = %d, want 2", len(entries))
+	}
+	entry := entries[1]
+	if got := entry["type"]; got != "response" {
+		t.Fatalf("entry type = %v, want response", got)
+	}
+
+	const wantUpstream = "bedrock-mantle.us-west-2.api.aws"
+	if got := entry["path"]; got != "/openai/v1/responses" {
+		t.Fatalf("path = %v, want /openai/v1/responses", got)
+	}
+	if got := entry["upstream"]; got != wantUpstream {
+		t.Fatalf("upstream = %v, want %v", got, wantUpstream)
+	}
+	// bedrock-mantle.* isn't a host meteringProviderFromUpstream recognizes
+	// (the bastion consumer's ProviderFromHost has the same gap); mantle's
+	// _meta.provider already carries "openai" and covers metering resolution
+	// through the consumer's documented legacy-shim fallback.
+	if got, want := entry["metering_provider"], meteringProviderFromUpstream(wantUpstream); got != want {
+		t.Fatalf("metering_provider = %v, want %v", got, want)
+	}
+	if got := entry["capture_version"]; got != float64(CaptureVersion) {
+		t.Fatalf("capture_version = %v, want %v", got, CaptureVersion)
+	}
+}
+
+// TestServeMantleAbortedResponseObservationStampsCaptureFacts covers the
+// abort-path builder (logMantleAbortedResponseObservation) with the same
+// capture-fact stamps as the success path above.
+func TestServeMantleAbortedResponseObservationStampsCaptureFacts(t *testing.T) {
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("mock server should not be called when custom RoundTripper is installed")
+	}))
+	defer mock.Close()
+
+	counterSub, _ := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"run-test"}`)
+	proxy.tokenSub = counterSub
+	proxy.bedrock.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, errors.New("dial boom")
+		}),
+	}
+
+	req := httptest.NewRequest("POST", "/cbrun/run-test/mantle/v1/responses", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502. body=%s", w.Code, w.Body.String())
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 2 {
+		t.Fatalf("log entries = %d, want 2", len(entries))
+	}
+	entry := entries[1]
+	if got := entry["termination"]; got != TerminationUpstreamUnreachable {
+		t.Fatalf("termination = %v, want %v", got, TerminationUpstreamUnreachable)
+	}
+
+	const wantUpstream = "bedrock-mantle.us-west-2.api.aws"
+	if got := entry["path"]; got != "/openai/v1/responses" {
+		t.Fatalf("path = %v, want /openai/v1/responses", got)
+	}
+	if got := entry["upstream"]; got != wantUpstream {
+		t.Fatalf("upstream = %v, want %v", got, wantUpstream)
+	}
+	if got, want := entry["metering_provider"], meteringProviderFromUpstream(wantUpstream); got != want {
+		t.Fatalf("metering_provider = %v, want %v", got, want)
+	}
+	if got := entry["capture_version"]; got != float64(CaptureVersion) {
+		t.Fatalf("capture_version = %v, want %v", got, CaptureVersion)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
