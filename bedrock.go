@@ -478,15 +478,29 @@ func (p *Proxy) serveBedrockStreaming(w http.ResponseWriter, resp *http.Response
 		}
 	}
 
+	termination := TerminationEOF
+	if copyErr != nil {
+		termination = TerminationUpstreamError
+		if resp.Request != nil && resp.Request.Context().Err() != nil {
+			// The outbound request rides the inbound request's context, so a
+			// canceled context means the client hung up on us.
+			termination = TerminationClientCancel
+		}
+	}
+
 	if shouldLog {
 		timing := ResponseTiming{
 			TTFBMs:  ttfb.Milliseconds(),
 			TotalMs: totalTime.Milliseconds(),
 		}
-		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, chunks, timing, requestID, ResponseCapture{Path: path, Termination: TerminationEOF})
+		capture := ResponseCapture{Path: path, Termination: termination}
+		if copyErr != nil {
+			capture.TerminationError = copyErr.Error()
+		}
+		p.logger.LogResponse(sessionID, provider, seq, resp.StatusCode, resp.Header, nil, chunks, timing, requestID, capture)
 
-		// Emit agent observability events
-		if p.eventEmitter != nil && patternState != nil && p.sessionManager != nil && len(chunks) > 0 {
+		// Emit agent observability events; clean-EOF-only, mirroring streamResponse.
+		if termination == TerminationEOF && p.eventEmitter != nil && patternState != nil && p.sessionManager != nil && len(chunks) > 0 {
 			parsed := ParseStreamingResponse(chunks)
 			emitResponseEvents(p.eventEmitter, p.sessionManager, sessionID, provider, p.machineID, patternState, parsed.Content, parsed.Usage, parsed.StopReason, resp.StatusCode, "")
 		}

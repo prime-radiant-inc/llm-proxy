@@ -742,6 +742,51 @@ func TestServeMantleNonStreamingPassThroughBeforeDrain(t *testing.T) {
 	}
 }
 
+func TestServeMantleNonStreamingCopyErrorStampsNonEOFTermination(t *testing.T) {
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("mock server should not be called when custom RoundTripper is installed")
+	}))
+	defer mock.Close()
+
+	counterSub, counter := newCountingResolver(t, `{"token":"REAL-BEARER","run_id":"run-test"}`)
+	proxy.tokenSub = counterSub
+	proxy.bedrock.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       &errAfterDataReadCloser{data: []byte(`{"id":"resp_123"`)},
+			}, nil
+		}),
+	}
+
+	req := httptest.NewRequest("POST", "/cbrun/run-test/mantle/v1/responses", strings.NewReader(`{"model":"openai.gpt-5.5","input":"hi"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer inbound-nonce")
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. body=%s", w.Code, w.Body.String())
+	}
+	if readResolverCalls(t, counter) != 1 {
+		t.Fatalf("resolver calls = %d, want 1", readResolverCalls(t, counter))
+	}
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	if len(entries) != 2 {
+		t.Fatalf("log entries = %d, want 2", len(entries))
+	}
+	entry := entries[1]
+	if got := entry["type"]; got != "response" {
+		t.Fatalf("entry type = %v, want response", got)
+	}
+	if got := entry["termination"]; got != TerminationUpstreamError {
+		t.Fatalf("termination = %v, want %v (copy error mid-relay, no client cancel)", got, TerminationUpstreamError)
+	}
+}
+
 func TestServeMantleLogsStreamingReadErrorObservation(t *testing.T) {
 	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("mock server should not be called when custom RoundTripper is installed")

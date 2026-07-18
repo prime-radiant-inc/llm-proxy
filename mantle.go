@@ -198,6 +198,7 @@ func (p *Proxy) serveMantleForPathWithAttribution(w http.ResponseWriter, r *http
 			nil,
 			sw.Chunks(),
 			reqBody,
+			TerminationEOF,
 		)
 		return
 	}
@@ -211,6 +212,16 @@ func (p *Proxy) serveMantleForPathWithAttribution(w http.ResponseWriter, r *http
 	w.WriteHeader(resp.StatusCode)
 	_, copyErr := io.Copy(w, tee)
 
+	termination := TerminationEOF
+	if copyErr != nil {
+		termination = TerminationUpstreamError
+		if resp.Request != nil && resp.Request.Context().Err() != nil {
+			// The outbound request rides the inbound request's context, so a
+			// canceled context means the client hung up on us.
+			termination = TerminationClientCancel
+		}
+	}
+
 	p.logMantleResponseObservation(
 		sessionID,
 		requestID,
@@ -223,11 +234,8 @@ func (p *Proxy) serveMantleForPathWithAttribution(w http.ResponseWriter, r *http
 		decodeBodyForLogging(observeBuf.Bytes(), resp.Header),
 		nil,
 		reqBody,
+		termination,
 	)
-
-	if copyErr != nil {
-		return
-	}
 }
 
 func parseCloudBuildMantlePath(path string) (runID string, mantlePath string, ok bool) {
@@ -395,7 +403,7 @@ func (p *Proxy) logMantleRequestObservation(sessionID, requestID string, attribu
 	p.writeMantleObservation(sessionID, entry)
 }
 
-func (p *Proxy) logMantleResponseObservation(sessionID, requestID string, attribution mantleAttribution, status int, timing ResponseTiming, respBody []byte, chunks []StreamChunk, reqBody []byte) {
+func (p *Proxy) logMantleResponseObservation(sessionID, requestID string, attribution mantleAttribution, status int, timing ResponseTiming, respBody []byte, chunks []StreamChunk, reqBody []byte, termination string) {
 	model := mantleRequestModel(reqBody)
 	response := map[string]any{}
 	if len(chunks) > 0 {
@@ -411,7 +419,7 @@ func (p *Proxy) logMantleResponseObservation(sessionID, requestID string, attrib
 		"type":        "response",
 		"status":      status,
 		"timing":      timing,
-		"termination": TerminationEOF,
+		"termination": termination,
 		"_meta":       p.newMantleMeta(sessionID, requestID, attribution, model),
 		"response":    response,
 	}

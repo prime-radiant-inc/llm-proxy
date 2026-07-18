@@ -366,3 +366,39 @@ func TestServeBedrockPairsUpstreamUnreachableWithResponseRecord(t *testing.T) {
 		t.Errorf("termination_error should be present")
 	}
 }
+
+func TestServeBedrockStreamingCopyErrorStampsNonEOFTermination(t *testing.T) {
+	proxy, mock := newTestBedrockProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("mock server should not be called when custom RoundTripper is installed")
+	}))
+	defer mock.Close()
+
+	proxy.bedrock.client = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/vnd.amazon.eventstream"}},
+				Body:       &errAfterDataReadCloser{data: []byte("partial")},
+			}, nil
+		}),
+	}
+
+	req := httptest.NewRequest("POST", "/model/us.anthropic.claude-sonnet-4-5-20250929-v2:0/invoke-with-response-stream",
+		strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	proxy.serveBedrock(w, req)
+
+	entries := readObservationLogEntries(t, proxy.logger.(*Logger))
+	responseEntries := filterResponseEntries(entries)
+	if len(responseEntries) != 1 {
+		t.Fatalf("expected exactly 1 response entry, got %d: %v", len(responseEntries), responseEntries)
+	}
+	if got := responseEntries[0]["termination"]; got != TerminationUpstreamError {
+		t.Errorf("termination = %v, want %v (copy error mid-relay, no client cancel)", got, TerminationUpstreamError)
+	}
+	if _, present := responseEntries[0]["termination_error"]; !present {
+		t.Errorf("termination_error should be present")
+	}
+}
