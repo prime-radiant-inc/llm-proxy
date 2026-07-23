@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -13,10 +14,14 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 )
 
-// platformAWSMode is the only accepted value for ANTHROPIC_AWS_MODE. It selects
-// SigV4-signed forwarding to Claude Platform on AWS instead of first-party
-// Anthropic passthrough.
-const platformAWSMode = "platform"
+// platformAWSMode selects SigV4-signed forwarding to Claude Platform on AWS.
+// platformAWSModeOff and the empty string both disable it (first-party
+// passthrough) regardless of the region/workspace vars, so a rollback is just
+// blanking ANTHROPIC_AWS_MODE.
+const (
+	platformAWSMode    = "platform"
+	platformAWSModeOff = "off"
+)
 
 // platformAWSService is the SigV4 service name for Claude Platform on AWS.
 const platformAWSService = "aws-external-anthropic"
@@ -77,6 +82,12 @@ func (p *Proxy) applyPlatformAWS(proxyReq *http.Request, reqBody []byte) error {
 		proxyReq.Header.Set("Anthropic-Version", anthropicVersionDefault)
 	}
 
+	// Strip hop-by-hop headers BEFORE signing. Go's transport rewrites or drops
+	// these in transit (e.g. an SDK-sent Connection header arrives at AWS with an
+	// empty value), so signing over them yields a SignedHeaders set that no longer
+	// matches what is transmitted → SignatureDoesNotMatch (401).
+	stripHopByHopHeaders(proxyReq.Header)
+
 	creds, err := st.credProv.Retrieve(proxyReq.Context())
 	if err != nil {
 		return fmt.Errorf("retrieve AWS credentials: %w", err)
@@ -93,4 +104,35 @@ func (p *Proxy) applyPlatformAWS(proxyReq *http.Request, reqBody []byte) error {
 func sha256Hex(data []byte) string {
 	h := sha256.Sum256(data)
 	return hex.EncodeToString(h[:])
+}
+
+// hopByHopHeaders are the connection-scoped headers that must not be SigV4-signed:
+// Go's transport rewrites or drops them in transit, so signing over them makes the
+// SignedHeaders set diverge from what the upstream receives.
+var hopByHopHeaders = []string{
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Connection",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"TE",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+// stripHopByHopHeaders removes hop-by-hop headers from h, including any header
+// named in the Connection header's value (RFC 7230 §6.1). Header.Del canonicalizes
+// keys, so the mixed-case names above match regardless of the sender's casing.
+func stripHopByHopHeaders(h http.Header) {
+	for _, connVal := range h.Values("Connection") {
+		for _, name := range strings.Split(connVal, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				h.Del(name)
+			}
+		}
+	}
+	for _, name := range hopByHopHeaders {
+		h.Del(name)
+	}
 }

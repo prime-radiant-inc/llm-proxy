@@ -112,7 +112,7 @@ Sessions are tracked via `client_session_id` extracted from request bodies (e.g.
 | `LLM_PROXY_LOKI_USE_GZIP` | Enable gzip compression (`true` or `1`, default: true) |
 | `LLM_PROXY_LOKI_ENVIRONMENT` | Environment label for Grafana filtering |
 | `BEDROCK_REGION` | AWS region for Bedrock (e.g., `us-west-2`). Enables Bedrock signing proxy mode |
-| `ANTHROPIC_AWS_MODE` | Set to `platform` to SigV4-sign anthropic passthrough traffic to Claude Platform on AWS instead of first-party Anthropic. Requires `ANTHROPIC_AWS_REGION` and `ANTHROPIC_AWS_WORKSPACE_ID`; all three unset = first-party passthrough (default) |
+| `ANTHROPIC_AWS_MODE` | Set to `platform` to SigV4-sign anthropic passthrough traffic to Claude Platform on AWS instead of first-party Anthropic (requires `ANTHROPIC_AWS_REGION` and `ANTHROPIC_AWS_WORKSPACE_ID`). Empty or `off` = first-party passthrough (default); disables cleanly even if region/workspace remain set, so rollback is just blanking this var |
 | `ANTHROPIC_AWS_REGION` | AWS region for Claude Platform on AWS (e.g., `us-west-2`) |
 | `ANTHROPIC_AWS_WORKSPACE_ID` | Anthropic workspace id (`wrkspc_...`) sent as the `anthropic-workspace-id` header |
 

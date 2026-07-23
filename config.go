@@ -121,30 +121,26 @@ func ValidateBedrockRegion(region string) error {
 	return nil
 }
 
-// ValidatePlatformAWSConfig validates the Claude Platform on AWS settings. All
-// three empty means disabled (valid). Otherwise mode must be "platform" and both
-// region and workspace ID must be set, with a well-formed region. Any partial or
-// unknown configuration is a loud error.
+// ValidatePlatformAWSConfig validates the Claude Platform on AWS settings. The
+// mode is the sole switch: empty or "off" disables cleanly regardless of the
+// region/workspace vars (so a rollback is just blanking ANTHROPIC_AWS_MODE). Only
+// mode "platform" requires a well-formed region and a workspace ID. Any other
+// mode value is a loud error.
 func ValidatePlatformAWSConfig(mode, region, workspaceID string) error {
-	set := 0
-	for _, v := range []string{mode, region, workspaceID} {
-		if v != "" {
-			set++
-		}
-	}
-	if set == 0 {
+	switch mode {
+	case "", platformAWSModeOff:
 		return nil
+	case platformAWSMode:
+		if region == "" || workspaceID == "" {
+			return fmt.Errorf("platform-on-AWS requires ANTHROPIC_AWS_REGION and ANTHROPIC_AWS_WORKSPACE_ID when ANTHROPIC_AWS_MODE=platform (region=%q workspace=%q)", region, workspaceID)
+		}
+		if !validAWSRegion.MatchString(region) {
+			return fmt.Errorf("invalid ANTHROPIC_AWS_REGION %q", region)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown ANTHROPIC_AWS_MODE %q (want %q or empty/%q)", mode, platformAWSMode, platformAWSModeOff)
 	}
-	if mode != platformAWSMode {
-		return fmt.Errorf("ANTHROPIC_AWS_MODE must be %q when platform-on-AWS config is set (got %q)", platformAWSMode, mode)
-	}
-	if region == "" || workspaceID == "" {
-		return fmt.Errorf("platform-on-AWS requires ANTHROPIC_AWS_MODE, ANTHROPIC_AWS_REGION, and ANTHROPIC_AWS_WORKSPACE_ID all set (region=%q workspace=%q)", region, workspaceID)
-	}
-	if !validAWSRegion.MatchString(region) {
-		return fmt.Errorf("invalid ANTHROPIC_AWS_REGION %q", region)
-	}
-	return nil
 }
 
 func LoadConfigFromEnv(cfg Config) Config {
