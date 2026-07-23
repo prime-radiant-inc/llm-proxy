@@ -97,6 +97,30 @@ func NewServer(cfg Config) (*Server, error) {
 		log.Printf("Bedrock: enabled (region=%s)", cfg.BedrockRegion)
 	}
 
+	// Initialize Claude Platform on AWS signing if configured. Partial config
+	// fails loudly here rather than silently falling back to first-party.
+	if err := ValidatePlatformAWSConfig(cfg.AnthropicAWSMode, cfg.AnthropicAWSRegion, cfg.AnthropicAWSWorkspaceID); err != nil {
+		if lokiExporter != nil {
+			lokiExporter.Close()
+		}
+		sessionManager.Close()
+		fileLogger.Close()
+		return nil, err
+	}
+	if cfg.AnthropicAWSMode == platformAWSMode {
+		platformAWS, platformErr := initPlatformAWS(cfg.AnthropicAWSRegion, cfg.AnthropicAWSWorkspaceID)
+		if platformErr != nil {
+			if lokiExporter != nil {
+				lokiExporter.Close()
+			}
+			sessionManager.Close()
+			fileLogger.Close()
+			return nil, platformErr
+		}
+		proxy.platformAWS = platformAWS
+		log.Printf("Platform-on-AWS: enabled (region=%s workspace=%s)", cfg.AnthropicAWSRegion, cfg.AnthropicAWSWorkspaceID)
+	}
+
 	if cfg.APITokenSubstitution.Enabled {
 		sub, err := NewAPITokenSubstituter(cfg.APITokenSubstitution)
 		if err != nil {
