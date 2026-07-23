@@ -85,6 +85,89 @@ func TestApplyPlatformAWS_RewritesUpstreamAndSigns(t *testing.T) {
 	}
 }
 
+// signedHeadersFromAuth extracts the SignedHeaders list (semicolon-separated,
+// lowercase) from an AWS4-HMAC-SHA256 Authorization header.
+func signedHeadersFromAuth(t *testing.T, auth string) []string {
+	t.Helper()
+	const marker = "SignedHeaders="
+	i := strings.Index(auth, marker)
+	if i < 0 {
+		t.Fatalf("no SignedHeaders in Authorization: %q", auth)
+	}
+	rest := auth[i+len(marker):]
+	if j := strings.Index(rest, ","); j >= 0 {
+		rest = rest[:j]
+	}
+	return strings.Split(strings.TrimSpace(rest), ";")
+}
+
+// TestApplyPlatformAWS_StripsHopByHopBeforeSigning is the regression for the live
+// 401: the Anthropic SDK sends a Connection header, which Go's transport strips
+// or normalizes in transit. If it is signed, AWS computes `connection:` empty and
+// the signature never matches. Hop-by-hop headers must be removed BEFORE signing,
+// so the signed header set equals what is actually transmitted.
+func TestApplyPlatformAWS_StripsHopByHopBeforeSigning(t *testing.T) {
+	p := newTestPlatformProxy("us-west-2", "wrkspc_hop")
+	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
+
+	req, err := http.NewRequest("POST", "http://localhost:9999/v1/messages", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	// The header shape the real SDK sends: hop-by-hop Connection plus a header it
+	// names, alongside legitimate x-stainless-* headers that DO survive transit.
+	req.Header.Set("Connection", "keep-alive, X-Custom-Hop")
+	req.Header.Set("X-Custom-Hop", "drop-me")
+	req.Header.Set("Keep-Alive", "timeout=5")
+	req.Header.Set("Transfer-Encoding", "chunked")
+	req.Header.Set("X-Stainless-Lang", "js")
+	req.Header.Set("X-Stainless-Runtime", "node")
+	req.Header.Set("X-Stainless-Package-Version", "0.0.0")
+
+	if err := p.applyPlatformAWS(req, body); err != nil {
+		t.Fatalf("applyPlatformAWS: %v", err)
+	}
+
+	// Hop-by-hop headers and the header named by Connection must be gone from the
+	// transmitted request.
+	for _, h := range []string{"Connection", "X-Custom-Hop", "Keep-Alive", "Transfer-Encoding"} {
+		if req.Header.Get(h) != "" {
+			t.Errorf("%s should be stripped before signing, still present: %q", h, req.Header.Get(h))
+		}
+	}
+	// Legitimate headers survive and are forwarded.
+	if req.Header.Get("X-Stainless-Lang") != "js" {
+		t.Error("x-stainless-lang should be preserved")
+	}
+
+	signed := signedHeadersFromAuth(t, req.Header.Get("Authorization"))
+	signedSet := map[string]bool{}
+	for _, s := range signed {
+		signedSet[s] = true
+	}
+	// The bug: connection (and other hop-by-hop) must NOT be in SignedHeaders.
+	for _, banned := range []string{"connection", "x-custom-hop", "keep-alive", "transfer-encoding"} {
+		if signedSet[banned] {
+			t.Errorf("%q must not be in SignedHeaders (hop-by-hop): %v", banned, signed)
+		}
+	}
+	// The stainless headers, being transmitted, are fine to sign.
+	if !signedSet["x-stainless-lang"] {
+		t.Errorf("expected x-stainless-lang in SignedHeaders: %v", signed)
+	}
+	// Signed set must equal transmitted set. host and content-length are managed
+	// by Go's transport (kept off the header map) but ARE transmitted exactly as
+	// signed; every other signed header must be present on the request.
+	for _, name := range signed {
+		if name == "host" || name == "content-length" {
+			continue
+		}
+		if req.Header.Get(name) == "" {
+			t.Errorf("signed header %q is not present on the transmitted request; signed set diverges from transmitted set", name)
+		}
+	}
+}
+
 func TestServeHTTP_PlatformAWS_SignedRoundTrip(t *testing.T) {
 	var captured http.Header
 	var capturedPath string

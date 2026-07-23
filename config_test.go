@@ -303,11 +303,14 @@ func TestValidatePlatformAWSConfig(t *testing.T) {
 		{"fully configured", "platform", "us-west-2", "wrkspc_1", false},
 		{"missing region", "platform", "", "wrkspc_1", true},
 		{"missing workspace", "platform", "us-west-2", "", true},
-		{"partial: region+workspace, no mode", "", "us-west-2", "wrkspc_1", true},
-		{"partial: mode only", "platform", "", "", true},
+		{"mode only, no region/workspace", "platform", "", "", true},
 		{"unknown mode", "bogus", "us-west-2", "wrkspc_1", true},
 		{"invalid region format", "platform", "us_west_2", "wrkspc_1", true},
 		{"region injection", "platform", "us-west-2/../evil", "wrkspc_1", true},
+		// Rollback ergonomics: blanking mode disables cleanly even if region and
+		// workspace are still set, so a rollback is just blanking ANTHROPIC_AWS_MODE.
+		{"empty mode with leftover region+workspace disables", "", "us-west-2", "wrkspc_1", false},
+		{"off mode with leftover region+workspace disables", "off", "us-west-2", "wrkspc_1", false},
 	}
 
 	for _, tt := range tests {
