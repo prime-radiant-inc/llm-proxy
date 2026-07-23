@@ -4,10 +4,15 @@ package main
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
+
+// validAWSRegion matches an AWS region identifier (e.g. us-west-2). It guards the
+// region before it is interpolated into the Claude Platform on AWS hostname.
+var validAWSRegion = regexp.MustCompile(`^[a-z]{2}-[a-z]+-[0-9]+$`)
 
 // validBedrockRegions lists AWS regions where Bedrock is available for Claude models.
 var validBedrockRegions = map[string]bool{
@@ -38,10 +43,16 @@ type APITokenSubstitutionConfig struct {
 }
 
 type Config struct {
-	Port                         int                        `toml:"port"`
-	LogDir                       string                     `toml:"log_dir"`
-	LogDirConfigured             bool                       `toml:"-"`
-	BedrockRegion                string                     `toml:"bedrock_region"` // AWS region for Bedrock (empty = disabled)
+	Port             int    `toml:"port"`
+	LogDir           string `toml:"log_dir"`
+	LogDirConfigured bool   `toml:"-"`
+	BedrockRegion    string `toml:"bedrock_region"` // AWS region for Bedrock (empty = disabled)
+	// Claude Platform on AWS: SigV4-signed forwarding of anthropic passthrough
+	// traffic. All three empty = disabled (first-party passthrough). Partial
+	// config fails loudly at startup (see ValidatePlatformAWSConfig).
+	AnthropicAWSMode             string                     `toml:"anthropic_aws_mode"`         // "platform" enables
+	AnthropicAWSRegion           string                     `toml:"anthropic_aws_region"`       // e.g. us-west-2
+	AnthropicAWSWorkspaceID      string                     `toml:"anthropic_aws_workspace_id"` // wrkspc_...
 	MantleRequireCloudBuildRunID bool                       `toml:"mantle_require_cloud_build_run_id"`
 	ServiceMode                  bool                       `toml:"-"` // CLI-only, not persisted in config file
 	SetupShell                   bool                       `toml:"-"` // CLI-only, not persisted in config file
@@ -110,6 +121,32 @@ func ValidateBedrockRegion(region string) error {
 	return nil
 }
 
+// ValidatePlatformAWSConfig validates the Claude Platform on AWS settings. All
+// three empty means disabled (valid). Otherwise mode must be "platform" and both
+// region and workspace ID must be set, with a well-formed region. Any partial or
+// unknown configuration is a loud error.
+func ValidatePlatformAWSConfig(mode, region, workspaceID string) error {
+	set := 0
+	for _, v := range []string{mode, region, workspaceID} {
+		if v != "" {
+			set++
+		}
+	}
+	if set == 0 {
+		return nil
+	}
+	if mode != platformAWSMode {
+		return fmt.Errorf("ANTHROPIC_AWS_MODE must be %q when platform-on-AWS config is set (got %q)", platformAWSMode, mode)
+	}
+	if region == "" || workspaceID == "" {
+		return fmt.Errorf("platform-on-AWS requires ANTHROPIC_AWS_MODE, ANTHROPIC_AWS_REGION, and ANTHROPIC_AWS_WORKSPACE_ID all set (region=%q workspace=%q)", region, workspaceID)
+	}
+	if !validAWSRegion.MatchString(region) {
+		return fmt.Errorf("invalid ANTHROPIC_AWS_REGION %q", region)
+	}
+	return nil
+}
+
 func LoadConfigFromEnv(cfg Config) Config {
 	if port := os.Getenv("LLM_PROXY_PORT"); port != "" {
 		if p, err := strconv.Atoi(port); err == nil {
@@ -122,6 +159,15 @@ func LoadConfigFromEnv(cfg Config) Config {
 	}
 	if region := os.Getenv("BEDROCK_REGION"); region != "" {
 		cfg.BedrockRegion = region
+	}
+	if mode := os.Getenv("ANTHROPIC_AWS_MODE"); mode != "" {
+		cfg.AnthropicAWSMode = mode
+	}
+	if region := os.Getenv("ANTHROPIC_AWS_REGION"); region != "" {
+		cfg.AnthropicAWSRegion = region
+	}
+	if workspaceID := os.Getenv("ANTHROPIC_AWS_WORKSPACE_ID"); workspaceID != "" {
+		cfg.AnthropicAWSWorkspaceID = workspaceID
 	}
 	if v := os.Getenv("LLM_PROXY_MANTLE_REQUIRE_CLOUD_BUILD_RUN_ID"); v != "" {
 		cfg.MantleRequireCloudBuildRunID = v == "true" || v == "1"

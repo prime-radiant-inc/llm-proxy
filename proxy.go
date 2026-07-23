@@ -61,6 +61,7 @@ type Proxy struct {
 	eventEmitter                 AgentEventEmitter
 	machineID                    string
 	bedrock                      *bedrockState
+	platformAWS                  *platformAWSState
 	tokenSub                     *APITokenSubstituter
 	mantleRequireCloudBuildRunID bool
 	// allowedUpstreams is the config-driven SSRF allowlist (provider -> hosts),
@@ -532,6 +533,16 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 			p.logger.LogSessionStart(sessionID, provider, upstream)
 		}
 		p.logger.LogRequest(sessionID, provider, seq, r.Method, path, r.Header, reqBody, requestID)
+	}
+
+	// Claude Platform on AWS: SigV4-sign the anthropic passthrough and retarget
+	// it at the AWS endpoint. Logging/session vars above are left as the client
+	// named them, so session identity is preserved.
+	if p.platformAWS != nil && provider == "anthropic" {
+		if err := p.applyPlatformAWS(proxyReq, reqBody); err != nil {
+			http.Error(w, "platform-aws signing failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Make request to upstream

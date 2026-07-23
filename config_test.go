@@ -273,6 +273,53 @@ func TestLoadConfigFromTOMLMantleRequireCloudBuildRunID(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFromEnv_PlatformAWS(t *testing.T) {
+	t.Setenv("ANTHROPIC_AWS_MODE", "platform")
+	t.Setenv("ANTHROPIC_AWS_REGION", "us-west-2")
+	t.Setenv("ANTHROPIC_AWS_WORKSPACE_ID", "wrkspc_abc")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	if cfg.AnthropicAWSMode != "platform" {
+		t.Errorf("AnthropicAWSMode = %q, want 'platform'", cfg.AnthropicAWSMode)
+	}
+	if cfg.AnthropicAWSRegion != "us-west-2" {
+		t.Errorf("AnthropicAWSRegion = %q, want 'us-west-2'", cfg.AnthropicAWSRegion)
+	}
+	if cfg.AnthropicAWSWorkspaceID != "wrkspc_abc" {
+		t.Errorf("AnthropicAWSWorkspaceID = %q, want 'wrkspc_abc'", cfg.AnthropicAWSWorkspaceID)
+	}
+}
+
+func TestValidatePlatformAWSConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		mode        string
+		region      string
+		workspaceID string
+		wantErr     bool
+	}{
+		{"all empty = disabled", "", "", "", false},
+		{"fully configured", "platform", "us-west-2", "wrkspc_1", false},
+		{"missing region", "platform", "", "wrkspc_1", true},
+		{"missing workspace", "platform", "us-west-2", "", true},
+		{"partial: region+workspace, no mode", "", "us-west-2", "wrkspc_1", true},
+		{"partial: mode only", "platform", "", "", true},
+		{"unknown mode", "bogus", "us-west-2", "wrkspc_1", true},
+		{"invalid region format", "platform", "us_west_2", "wrkspc_1", true},
+		{"region injection", "platform", "us-west-2/../evil", "wrkspc_1", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidatePlatformAWSConfig(tt.mode, tt.region, tt.workspaceID)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidatePlatformAWSConfig(%q, %q, %q) error = %v, wantErr %v", tt.mode, tt.region, tt.workspaceID, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestLoadConfigFromTOML_LokiSection(t *testing.T) {
 	tomlContent := `
 port = 12071
