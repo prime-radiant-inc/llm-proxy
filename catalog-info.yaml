@@ -5,8 +5,8 @@ metadata:
   description: "Transparent logging proxy for LLM API traffic that records every request/response to Claude, OpenAI, and other providers."
   annotations:
     backstage.io/techdocs-ref: dir:.
-    prime-radiant.com/repo-map-rev: "ddf1f68022938218e985f3015768b57e4955fe24"
-  tags: [go, proxy, logging, observability, llm, anthropic, openai]
+    prime-radiant.com/repo-map-rev: "e1a3a1aae5f4a3a9c59c24d752be5a001621287e"
+  tags: [go, proxy, logging, observability, llm, anthropic, openai, bedrock]
 spec:
   type: tool
   lifecycle: production

@@ -5,7 +5,7 @@
 **Family:** infra · **Type:** tool · **Lifecycle:** production · **Owner:** obra
 
 ## What it does
-Sits between LLM clients (Claude Code, Codex, API scripts) and provider APIs, logging every request and response to `~/.llm-provider-logs/` as JSONL. It auto-configures the shell (`ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL`) and runs as a background service started at login. Supports Anthropic, OpenAI, Bedrock, and OpenAI-compatible APIs, optional real-time export to Grafana Loki, and api-token substitution.
+Sits between LLM clients (Claude Code, Codex, API scripts) and provider APIs, logging every request and response to `~/.llm-provider-logs/` as JSONL. It auto-configures the shell (`ANTHROPIC_BASE_URL`/`OPENAI_BASE_URL`) and runs as a background service started at login. Supports Anthropic (including a platform-aws SigV4 signing mode), OpenAI, Bedrock, and OpenAI-compatible APIs, plus a Bedrock Mantle Responses-API pass-through with token substitution and run-scoped attribution for Cloud Build telemetry. Optional real-time export to Grafana Loki; request/response lines carry a capture-contract vocabulary (provider, upstream, path, termination) for downstream analysis.
 
 ## How it fits
 - Depends on: — (standalone Go binary; go.mod has only external/AWS SDK dependencies).
