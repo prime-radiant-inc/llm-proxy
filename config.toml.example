@@ -4,8 +4,9 @@
 # Port to listen on (default: 12071)
 port = 12071
 
-# Directory for log files (default: ./logs)
+# Directory for log files (runtime default: ~/.llm-provider-logs)
 # sessions.db is stored inside this directory
+# SECURITY: created log directories are owner-only (0700) and log/database files are owner-only (0600)
 log_dir = "./logs"
 
 listen_host = "localhost"   # bind address; defaults to "localhost" (loopback-only)
@@ -43,6 +44,10 @@ use_gzip = true
 # Environment label for Loki (default: "development")
 # Used as a label in Loki queries (e.g., development, staging, production)
 environment = "development"
+
+# NOTE: request/response bodies are redacted for common secret fields and token formats
+# before disk/Loki persistence, but logs can still contain sensitive prompt/output data.
+# You remain responsible for retention, access control, backup handling, and deletion.
 
 [api_token_substitution]
 enabled = false

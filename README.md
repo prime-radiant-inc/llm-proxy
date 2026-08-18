@@ -23,6 +23,8 @@ Restart your shell, and you're done.
 
 All LLM traffic is now logged to `~/.llm-provider-logs/`.
 
+By default the proxy and explorer bind to loopback only (`localhost`). Log directories are created owner-only (`0700`) and log/database files owner-only (`0600`).
+
 ## What It Does
 
 LLM Proxy sits between your LLM clients (Claude Code, Codex, API scripts) and the provider APIs. It:
@@ -48,6 +50,13 @@ LLM Proxy sits between your LLM clients (Claude Code, Codex, API scripts) and th
 ```
 
 Each session is a JSONL file with request/response pairs, timing information, and metadata.
+
+## Security Defaults
+
+- **Loopback-only listeners by default** for both the proxy and log explorer. Use `--listen-host`, `--explore-listen-host`, or config only when you intentionally need a non-loopback listener.
+- **Owner-only local storage**: log directories are created with `0700`; captured log files and `sessions.db` use `0600`.
+- **Best-effort secret redaction before persistence/export**: common secret-bearing JSON fields (for example API keys, tokens, passwords, client secrets, authorization-like fields) and common provider token formats are redacted before logs are written to disk or exported to Loki.
+- **Important limitation**: this project still captures full request/response bodies for debugging. Redaction reduces common secret leakage, but it cannot reliably identify every sensitive prompt or model output. Treat local logs and any remote export as sensitive data, and define your own retention/deletion policy.
 
 ## Remote Push (Loki Export)
 
@@ -88,6 +97,9 @@ Or use environment variables:
 - **Graceful degradation**: If Loki is unavailable, local file logging continues unaffected
 - **Buffered writes**: Logs are batched and retried on failure; buffer is flushed on shutdown
 - **Session correlation**: Logs include session IDs for querying all entries from a single session
+- **Transport guardrails**: HTTPS is the default expectation. Plain HTTP requires explicit opt-in and is appropriate only for intentional local/test deployments.
+
+Never place Loki credentials in the URL. Use `auth_token` / `LLM_PROXY_LOKI_AUTH_TOKEN`, private networking, TLS, and least-privilege Grafana/Loki access controls.
 
 ## Commands
 
@@ -123,6 +135,9 @@ If you prefer not to use the background service:
 ```bash
 # Run proxy on a specific port
 llm-proxy --port 12071
+
+# Intentional non-loopback access (only when separately protected)
+llm-proxy --port 12071 --listen-host 0.0.0.0
 
 # Configure clients manually
 export ANTHROPIC_BASE_URL=http://localhost:12071/anthropic/api.anthropic.com
@@ -179,6 +194,7 @@ Browse and search your LLM logs with a web UI:
 ```bash
 llm-proxy --explore              # Opens browser to http://localhost:12071
 llm-proxy --explore --explore-port 9000  # Use specific port
+llm-proxy --explore --explore-listen-host 0.0.0.0  # Intentional non-loopback access
 ```
 
 Features:

@@ -73,14 +73,29 @@ func ObfuscateHeaders(headers http.Header) http.Header {
 
 func isAPIKeyHeader(name string) bool {
 	lower := strings.ToLower(name)
-	return lower == "x-api-key" || lower == "authorization"
+	switch lower {
+	case "authorization", "proxy-authorization", "x-api-key", "x-auth-token", "x-access-token", "x-amz-security-token":
+		return true
+	case "cookie", "set-cookie":
+		return true
+	default:
+		return false
+	}
 }
 
 func obfuscateHeaderValue(value string) string {
-	// Handle "Bearer <token>" format
+	if value == "******" || value == redactedSecretValue {
+		return value
+	}
+	if strings.Contains(value, "=") && !strings.HasPrefix(value, "Bearer ") {
+		return redactedSecretValue
+	}
 	if strings.HasPrefix(value, "Bearer ") {
 		token := strings.TrimPrefix(value, "Bearer ")
-		return "Bearer " + ObfuscateAPIKey(token)
+		if token == "******" || token == redactedSecretValue {
+			return "Bearer " + token
+		}
+		return "Bearer " + redactTokenValue(token)
 	}
-	return ObfuscateAPIKey(value)
+	return redactTokenValue(value)
 }

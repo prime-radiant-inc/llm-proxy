@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -301,5 +302,82 @@ func TestRequestLogContextWritesLegacyRunMetadata(t *testing.T) {
 	}
 	if _, ok := meta["resolved_run_id"]; ok {
 		t.Fatalf("resolved_run_id unexpectedly present in legacy context: %#v", meta)
+	}
+}
+
+func TestLoggerCreatesOwnerOnlyLogPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not portable on Windows")
+	}
+
+	logRoot := filepath.Join(t.TempDir(), "logs")
+	logger, err := NewLogger(logRoot)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	sessionID := "secure-session"
+	upstream := "api.anthropic.com"
+	if err := logger.LogSessionStart(sessionID, "anthropic", upstream); err != nil {
+		t.Fatalf("LogSessionStart: %v", err)
+	}
+	if err := logger.LogRequest(sessionID, "anthropic", 1, "POST", "/v1/messages", http.Header{}, []byte(`{"ok":true}`), "req"); err != nil {
+		t.Fatalf("LogRequest: %v", err)
+	}
+
+	dateDir := filepath.Join(logRoot, upstream, time.Now().Format("2006-01-02"))
+	logFile := filepath.Join(dateDir, sessionID+".jsonl")
+	for path, want := range map[string]os.FileMode{
+		logRoot:                          0o700,
+		filepath.Join(logRoot, upstream): 0o700,
+		dateDir:                          0o700,
+		logFile:                          0o600,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat(%s): %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%s mode = %#o, want %#o", path, got, want)
+		}
+	}
+}
+
+func TestLoggerRedactsBodiesAndResponseHeadersOnDisk(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	sessionID := "redacted-session"
+	upstream := "api.anthropic.com"
+	if err := logger.LogSessionStart(sessionID, "anthropic", upstream); err != nil {
+		t.Fatalf("LogSessionStart: %v", err)
+	}
+	requestBody := []byte(`{"access_token":"secret-access-token","messages":[{"role":"user","content":"sk-ant-api03-abcdefghijklmnopqrstuvwxyz12345678"}]}`)
+	if err := logger.LogRequest(sessionID, "anthropic", 1, "POST", "/v1/messages", http.Header{"Authorization": {"******"}}, requestBody, "req-1"); err != nil {
+		t.Fatalf("LogRequest: %v", err)
+	}
+	responseChunks := []StreamChunk{{Timestamp: time.Now(), Raw: `data: {"refresh_token":"secret-refresh-token","cookie":"session=abc123"}`}}
+	if err := logger.LogResponse(sessionID, "anthropic", 1, 200, http.Header{"Set-Cookie": {"session=abc123"}}, nil, responseChunks, ResponseTiming{}, "req-1", ResponseCapture{Termination: TerminationEOF}); err != nil {
+		t.Fatalf("LogResponse: %v", err)
+	}
+
+	logPath := filepath.Join(tmpDir, upstream, time.Now().Format("2006-01-02"), sessionID+".jsonl")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	logged := string(data)
+	for _, secret := range []string{"secret-access-token", "secret-refresh-token", "abcdefghijklmnopqrstuvwxyz12345678", "abc123"} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("log still contains secret %q: %s", secret, logged)
+		}
+	}
+	if !strings.Contains(logged, redactedSecretValue) {
+		t.Fatalf("expected redaction marker in log: %s", logged)
 	}
 }

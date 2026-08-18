@@ -30,12 +30,13 @@ func NewServer(cfg Config) (*Server, error) {
 	var lokiExporter *LokiExporter
 	if cfg.Loki.Enabled && cfg.Loki.URL != "" {
 		lokiCfg := LokiExporterConfig{
-			URL:         cfg.Loki.URL,
-			AuthToken:   cfg.Loki.AuthToken,
-			BatchSize:   cfg.Loki.BatchSize,
-			RetryMax:    cfg.Loki.RetryMax,
-			UseGzip:     cfg.Loki.UseGzip,
-			Environment: cfg.Loki.Environment,
+			URL:               cfg.Loki.URL,
+			AuthToken:         cfg.Loki.AuthToken,
+			AllowInsecureHTTP: cfg.Loki.AllowInsecureHTTP,
+			BatchSize:         cfg.Loki.BatchSize,
+			RetryMax:          cfg.Loki.RetryMax,
+			UseGzip:           cfg.Loki.UseGzip,
+			Environment:       cfg.Loki.Environment,
 		}
 
 		// Parse batch wait duration

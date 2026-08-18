@@ -2,7 +2,9 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -421,6 +423,32 @@ func TestDBMigrationOnExistingDB(t *testing.T) {
 		}
 		if state.LastToolName != "" {
 			t.Errorf("Expected LastToolName='' for migrated session, got %q", state.LastToolName)
+		}
+	}
+}
+
+func TestNewSessionDBCreatesOwnerOnlyDatabaseFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not portable on Windows")
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "logs", "sessions.db")
+	db, err := NewSessionDB(dbPath)
+	if err != nil {
+		t.Fatalf("NewSessionDB: %v", err)
+	}
+	defer db.Close()
+
+	for path, want := range map[string]os.FileMode{
+		filepath.Dir(dbPath): 0o700,
+		dbPath:               0o600,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat(%s): %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%s mode = %#o, want %#o", path, got, want)
 		}
 	}
 }

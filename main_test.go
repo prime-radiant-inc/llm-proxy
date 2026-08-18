@@ -155,3 +155,26 @@ func TestListenAddr(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCLIFlagsListenHosts(t *testing.T) {
+	flags, err := ParseCLIFlags([]string{"--listen-host", "0.0.0.0", "--explore-listen-host", "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if flags.ListenHost != "0.0.0.0" {
+		t.Fatalf("ListenHost = %q", flags.ListenHost)
+	}
+	if flags.ExploreListenHost != "127.0.0.1" {
+		t.Fatalf("ExploreListenHost = %q", flags.ExploreListenHost)
+	}
+}
+
+func TestMergeConfig_PreservesExplicitListenHosts(t *testing.T) {
+	cfg := MergeConfig(DefaultConfig(), CLIFlags{ListenHost: "0.0.0.0", ExploreListenHost: "192.168.1.10"})
+	if cfg.ListenHost != "0.0.0.0" {
+		t.Fatalf("ListenHost = %q", cfg.ListenHost)
+	}
+	if cfg.ExploreListenHost != "192.168.1.10" {
+		t.Fatalf("ExploreListenHost = %q", cfg.ExploreListenHost)
+	}
+}

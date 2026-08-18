@@ -31,7 +31,7 @@ func TestNewLokiExporter_RequiresURL(t *testing.T) {
 
 func TestNewLokiExporter_DefaultValues(t *testing.T) {
 	cfg := LokiExporterConfig{
-		URL: "http://localhost:3100/loki/api/v1/push",
+		URL: "https://localhost:3100/loki/api/v1/push",
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -102,9 +102,10 @@ func TestDoSend_AuthTokenHeader(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:       server.URL,
-		AuthToken: "my-secret-token",
-		UseGzip:   false, // disable for simpler test
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		AuthToken:         "my-secret-token",
+		UseGzip:           false, // disable for simpler test
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -142,9 +143,10 @@ func TestDoSend_NoAuthToken(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:       server.URL,
-		AuthToken: "", // no auth token
-		UseGzip:   false,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		AuthToken:         "", // no auth token
+		UseGzip:           false,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -182,8 +184,9 @@ func TestDoSend_GzipCompression(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:     server.URL,
-		UseGzip: true,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		UseGzip:           true,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -237,10 +240,11 @@ func TestPush_AddsToChannel(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:        server.URL,
-		BatchSize:  100,                   // high threshold so no auto-flush
-		BatchWait:  10 * time.Second,      // long wait so no auto-flush
-		BufferSize: 100,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         100,              // high threshold so no auto-flush
+		BatchWait:         10 * time.Second, // long wait so no auto-flush
+		BufferSize:        100,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -280,10 +284,11 @@ func TestPush_DropsWhenChannelFull(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:        server.URL,
-		BatchSize:  10000,             // very high so no auto-flush from size
-		BatchWait:  10 * time.Second,  // very long so no auto-flush from time
-		BufferSize: 5,                 // tiny buffer to force drops
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         10000,            // very high so no auto-flush from size
+		BatchWait:         10 * time.Second, // very long so no auto-flush from time
+		BufferSize:        5,                // tiny buffer to force drops
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -325,10 +330,11 @@ func TestPush_ExtractsTimestamp(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:       server.URL,
-		BatchSize: 1,         // flush immediately
-		BatchWait: time.Hour, // don't wait
-		UseGzip:   false,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,         // flush immediately
+		BatchWait:         time.Hour, // don't wait
+		UseGzip:           false,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -378,10 +384,11 @@ func TestPush_ExtractsLogType(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:       server.URL,
-		BatchSize: 1,
-		BatchWait: time.Hour,
-		UseGzip:   false,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -423,11 +430,12 @@ func TestSendBatch_GroupsByLabels(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:         server.URL,
-		BatchSize:   4, // flush after 4 entries
-		BatchWait:   time.Hour,
-		UseGzip:     false,
-		Environment: "test",
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         4, // flush after 4 entries
+		BatchWait:         time.Hour,
+		UseGzip:           false,
+		Environment:       "test",
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -493,12 +501,13 @@ func TestSendBatch_RetriesOnError(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:       server.URL,
-		BatchSize: 1,
-		BatchWait: time.Hour,
-		RetryMax:  5,
-		RetryWait: 10 * time.Millisecond, // fast retries for test
-		UseGzip:   false,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		RetryMax:          5,
+		RetryWait:         10 * time.Millisecond, // fast retries for test
+		UseGzip:           false,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -546,12 +555,13 @@ func TestSendBatch_ExponentialBackoff(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:       server.URL,
-		BatchSize: 1,
-		BatchWait: time.Hour,
-		RetryMax:  5,
-		RetryWait: 50 * time.Millisecond, // base delay
-		UseGzip:   false,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		RetryMax:          5,
+		RetryWait:         50 * time.Millisecond, // base delay
+		UseGzip:           false,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -609,11 +619,12 @@ func TestClose_FlushesRemaining(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:        server.URL,
-		BatchSize:  1000,             // high threshold - won't trigger auto-flush
-		BatchWait:  10 * time.Second, // long wait - won't trigger auto-flush
-		UseGzip:    false,
-		BufferSize: 100,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1000,             // high threshold - won't trigger auto-flush
+		BatchWait:         10 * time.Second, // long wait - won't trigger auto-flush
+		UseGzip:           false,
+		BufferSize:        100,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -652,11 +663,12 @@ func TestClose_TimesOut(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:             server.URL,
-		BatchSize:       1,
-		BatchWait:       time.Hour,
-		UseGzip:         false,
-		ShutdownTimeout: 100 * time.Millisecond, // very short timeout for test
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
+		ShutdownTimeout:   100 * time.Millisecond, // very short timeout for test
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -697,13 +709,14 @@ func TestStats_Accurate(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:        server.URL,
-		BatchSize:  1, // flush each entry individually
-		BatchWait:  time.Hour,
-		RetryMax:   1, // only 1 retry, so some will fail
-		RetryWait:  10 * time.Millisecond,
-		UseGzip:    false,
-		BufferSize: 5, // small buffer to test drops
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1, // flush each entry individually
+		BatchWait:         time.Hour,
+		RetryMax:          1, // only 1 retry, so some will fail
+		RetryWait:         10 * time.Millisecond,
+		UseGzip:           false,
+		BufferSize:        5, // small buffer to test drops
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -763,10 +776,11 @@ func TestBatchFlushByTime(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:       server.URL,
-		BatchSize: 1000,                    // high threshold - won't trigger by size
-		BatchWait: 100 * time.Millisecond,  // short wait for test
-		UseGzip:   false,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1000,                   // high threshold - won't trigger by size
+		BatchWait:         100 * time.Millisecond, // short wait for test
+		UseGzip:           false,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -818,10 +832,11 @@ func TestBatchFlushBySize(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:       server.URL,
-		BatchSize: 5,                  // low threshold - trigger after 5 entries
-		BatchWait: 10 * time.Second,   // long wait - shouldn't trigger by time
-		UseGzip:   false,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         5,                // low threshold - trigger after 5 entries
+		BatchWait:         10 * time.Second, // long wait - shouldn't trigger by time
+		UseGzip:           false,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -878,11 +893,12 @@ func TestLokiPushRequestFormat(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:         server.URL,
-		BatchSize:   1,
-		BatchWait:   time.Hour,
-		UseGzip:     false,
-		Environment: "production",
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
+		Environment:       "production",
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -959,8 +975,9 @@ func TestDoSend_ReturnsErrorOn4xx(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:     server.URL,
-		UseGzip: false,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		UseGzip:           false,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1158,11 +1175,12 @@ func TestPush_ExtractsExtendedLabels(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:         server.URL,
-		BatchSize:   1,
-		BatchWait:   time.Hour,
-		UseGzip:     false,
-		Environment: "test",
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
+		Environment:       "test",
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1212,11 +1230,12 @@ func TestPush_ResponseExtendedLabels(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:         server.URL,
-		BatchSize:   1,
-		BatchWait:   time.Hour,
-		UseGzip:     false,
-		Environment: "test",
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
+		Environment:       "test",
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1265,8 +1284,9 @@ func TestDoSend_ReturnsErrorOn5xx(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:     server.URL,
-		UseGzip: false,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		UseGzip:           false,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1296,10 +1316,11 @@ func TestNonBlockingPush(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:        server.URL,
-		BatchSize:  1,
-		BatchWait:  time.Millisecond,
-		BufferSize: 1, // tiny buffer
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Millisecond,
+		BufferSize:        1, // tiny buffer
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1457,11 +1478,12 @@ func TestEmitTurnStart(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:         server.URL,
-		BatchSize:   1,
-		BatchWait:   time.Hour,
-		UseGzip:     false,
-		Environment: "test",
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
+		Environment:       "test",
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1515,11 +1537,12 @@ func TestEmitTurnEnd(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:         server.URL,
-		BatchSize:   1,
-		BatchWait:   time.Hour,
-		UseGzip:     false,
-		Environment: "test",
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
+		Environment:       "test",
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1608,11 +1631,12 @@ func TestEmitTurnEnd_WithRetryAndErrorType(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:         server.URL,
-		BatchSize:   1,
-		BatchWait:   time.Hour,
-		UseGzip:     false,
-		Environment: "test",
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
+		Environment:       "test",
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1654,11 +1678,12 @@ func TestEmitToolCall(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:         server.URL,
-		BatchSize:   1,
-		BatchWait:   time.Hour,
-		UseGzip:     false,
-		Environment: "test",
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
+		Environment:       "test",
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1711,11 +1736,12 @@ func TestEmitToolResult(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:         server.URL,
-		BatchSize:   1,
-		BatchWait:   time.Hour,
-		UseGzip:     false,
-		Environment: "test",
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
+		Environment:       "test",
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1768,11 +1794,12 @@ func TestEmitToolResult_NoError(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:         server.URL,
-		BatchSize:   1,
-		BatchWait:   time.Hour,
-		UseGzip:     false,
-		Environment: "test",
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
+		Environment:       "test",
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1813,10 +1840,11 @@ func TestEmitEvent_NumericValuesInBodyNotLabels(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:       server.URL,
-		BatchSize: 1,
-		BatchWait: time.Hour,
-		UseGzip:   false,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1855,10 +1883,11 @@ func TestEmitEvent_ToolUseIDInBodyNotLabels(t *testing.T) {
 	defer server.Close()
 
 	cfg := LokiExporterConfig{
-		URL:       server.URL,
-		BatchSize: 1,
-		BatchWait: time.Hour,
-		UseGzip:   false,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         time.Hour,
+		UseGzip:           false,
 	}
 
 	exporter, err := NewLokiExporter(cfg)
@@ -1945,9 +1974,10 @@ func TestLokiExporter_TransportLabel(t *testing.T) {
 	defer server.Close()
 
 	exporter, err := NewLokiExporter(LokiExporterConfig{
-		URL:       server.URL,
-		BatchSize: 1,
-		BatchWait: 100 * time.Millisecond,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         100 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("NewLokiExporter: %v", err)
@@ -2008,9 +2038,10 @@ func TestLokiExporter_TransportDefaultDirect(t *testing.T) {
 	defer server.Close()
 
 	exporter, err := NewLokiExporter(LokiExporterConfig{
-		URL:       server.URL,
-		BatchSize: 1,
-		BatchWait: 100 * time.Millisecond,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         1,
+		BatchWait:         100 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("NewLokiExporter: %v", err)
@@ -2058,9 +2089,10 @@ func TestLokiExporter_DifferentTransportsSeparateStreams(t *testing.T) {
 	defer server.Close()
 
 	exporter, err := NewLokiExporter(LokiExporterConfig{
-		URL:       server.URL,
-		BatchSize: 10,
-		BatchWait: 100 * time.Millisecond,
+		URL:               server.URL,
+		AllowInsecureHTTP: true,
+		BatchSize:         10,
+		BatchWait:         100 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("NewLokiExporter: %v", err)
@@ -2097,5 +2129,30 @@ func TestLokiExporter_DifferentTransportsSeparateStreams(t *testing.T) {
 	// Should have 2 separate streams due to different transport values
 	if len(receivedPayload.Streams) < 2 {
 		t.Errorf("expected 2 streams (different transports), got %d", len(receivedPayload.Streams))
+	}
+}
+
+func TestNewLokiExporter_RejectsPlainHTTPWithoutOptIn(t *testing.T) {
+	_, err := NewLokiExporter(LokiExporterConfig{URL: "http://loki.example.com/loki/api/v1/push"})
+	if err == nil || !strings.Contains(err.Error(), "allow_insecure_http") {
+		t.Fatalf("expected plain HTTP opt-in error, got %v", err)
+	}
+}
+
+func TestNewLokiExporter_AllowsPlainHTTPWithOptIn(t *testing.T) {
+	exporter, err := NewLokiExporter(LokiExporterConfig{URL: "http://loki.example.com/loki/api/v1/push", AllowInsecureHTTP: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer exporter.Close()
+}
+
+func TestNewLokiExporter_RejectsCredentialsInURL(t *testing.T) {
+	_, err := NewLokiExporter(LokiExporterConfig{URL: "https://user" + ":" + "pass@loki.example.com/loki/api/v1/push"})
+	if err == nil || !strings.Contains(err.Error(), "auth_token") {
+		t.Fatalf("expected credential rejection, got %v", err)
+	}
+	if strings.Contains(err.Error(), "user:pass") {
+		t.Fatalf("error leaked credentials: %v", err)
 	}
 }

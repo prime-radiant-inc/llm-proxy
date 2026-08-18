@@ -66,7 +66,7 @@ func TestNewServer_LokiDisabled(t *testing.T) {
 		LogDir: tmpDir,
 		Loki: LokiConfig{
 			Enabled: false,
-			URL:     "http://loki:3100/loki/api/v1/push",
+			URL:     "https://loki.example.com/loki/api/v1/push",
 		},
 	}
 
@@ -95,7 +95,7 @@ func TestNewServer_LokiEnabled(t *testing.T) {
 		LogDir: tmpDir,
 		Loki: LokiConfig{
 			Enabled:      true,
-			URL:          "http://loki:3100/loki/api/v1/push",
+			URL:          "https://loki.example.com/loki/api/v1/push",
 			BatchSize:    100,
 			BatchWaitStr: "1s",
 			RetryMax:     3,
@@ -206,7 +206,7 @@ func TestNewServer_EventEmitterWiredUp(t *testing.T) {
 		LogDir: tmpDir,
 		Loki: LokiConfig{
 			Enabled:      true,
-			URL:          "http://loki:3100/loki/api/v1/push",
+			URL:          "https://loki.example.com/loki/api/v1/push",
 			BatchSize:    100,
 			BatchWaitStr: "1s",
 			RetryMax:     3,
@@ -263,7 +263,7 @@ func TestHealthLoki_Enabled(t *testing.T) {
 		LogDir: tmpDir,
 		Loki: LokiConfig{
 			Enabled:      true,
-			URL:          "http://loki:3100/loki/api/v1/push",
+			URL:          "https://loki.example.com/loki/api/v1/push",
 			BatchSize:    100,
 			BatchWaitStr: "1s",
 			RetryMax:     3,
@@ -390,5 +390,25 @@ func TestNewServerWiresAllowedUpstreams(t *testing.T) {
 	}
 	if err := srv.proxy.checkUpstreamAllowed("openai", "other.example.com"); err == nil {
 		t.Fatal("expected unconfigured host to be rejected once the allowlist is wired from config")
+	}
+}
+
+func TestNewServer_LokiPlainHTTPRequiresOptIn(t *testing.T) {
+	tmpDir := t.TempDir()
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(nil)
+
+	srv, err := NewServer(Config{Port: 12071, LogDir: tmpDir, Loki: LokiConfig{Enabled: true, URL: "http://loki.example.com/loki/api/v1/push"}})
+	if err != nil {
+		t.Fatalf("NewServer should degrade gracefully: %v", err)
+	}
+	defer srv.Close()
+
+	if srv.lokiExporter != nil {
+		t.Fatal("expected lokiExporter to be nil when plain HTTP is not opted in")
+	}
+	if out := logBuf.String(); !strings.Contains(out, "allow_insecure_http") {
+		t.Fatalf("expected warning mentioning allow_insecure_http, got %s", out)
 	}
 }

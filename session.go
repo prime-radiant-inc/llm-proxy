@@ -3,7 +3,6 @@ package main
 
 import (
 	"net/http"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -87,7 +86,7 @@ func (sm *SessionManager) createNewSession(provider, upstream string) (string, i
 
 	// Create directory for upstream/date
 	logDir := filepath.Join(sm.baseDir, upstream, dateStr)
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	if err := ensurePrivateDir(logDir); err != nil {
 		return "", 0, false, err
 	}
 
@@ -107,7 +106,7 @@ func (sm *SessionManager) createNewSessionWithClientID(clientSessionID, provider
 
 	// Create directory for upstream/date
 	logDir := filepath.Join(sm.baseDir, upstream, dateStr)
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	if err := ensurePrivateDir(logDir); err != nil {
 		return "", 0, false, err
 	}
 

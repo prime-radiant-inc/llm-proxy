@@ -65,7 +65,7 @@ func getMachineID() string {
 }
 
 func NewLogger(baseDir string) (*Logger, error) {
-	if err := os.MkdirAll(baseDir, 0755); err != nil {
+	if err := ensurePrivateDir(baseDir); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
@@ -110,14 +110,18 @@ func (l *Logger) getFile(sessionID string) (*os.File, error) {
 	// Create directory: <baseDir>/<upstream>/<YYYY-MM-DD>/
 	dateStr := time.Now().Format("2006-01-02")
 	logDir := filepath.Join(l.baseDir, upstream, dateStr)
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	if err := ensurePrivateDir(logDir); err != nil {
 		return nil, err
 	}
 
 	// Open file for append
 	path := filepath.Join(logDir, sessionID+".jsonl")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, ownerOnlyFileMode)
 	if err != nil {
+		return nil, err
+	}
+	if err := enforceOwnerOnlyOpenFileMode(f); err != nil {
+		f.Close()
 		return nil, err
 	}
 
@@ -231,7 +235,7 @@ func (l *Logger) LogRequest(sessionID, provider string, seq int, method, path st
 		"method":  method,
 		"path":    path,
 		"headers": ObfuscateHeaders(headers),
-		"body":    string(body),
+		"body":    RedactLoggedBody(body),
 		"size":    len(body),
 		"_meta":   meta,
 	}
@@ -258,16 +262,16 @@ func (l *Logger) LogResponse(sessionID, provider string, seq int, status int, he
 		"type":    "response",
 		"seq":     seq,
 		"status":  status,
-		"headers": headers,
+		"headers": ObfuscateHeaders(headers),
 		"timing":  timing,
 		"size":    len(body),
 		"_meta":   meta,
 	}
 
 	if chunks != nil {
-		entry["chunks"] = chunks
+		entry["chunks"] = RedactLoggedChunks(chunks)
 	} else {
-		entry["body"] = string(body)
+		entry["body"] = RedactLoggedBody(body)
 	}
 
 	entry["upstream"] = upstream
