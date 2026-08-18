@@ -45,7 +45,7 @@ func ParseProxyURL(urlPath string) (provider, upstream, path string, err error) 
 		return "", "", "", ErrUnknownProvider
 	}
 
-	if upstream == "" {
+	if upstream == "" || upstream == "." || upstream == ".." || strings.ContainsAny(upstream, `/\`) {
 		return "", "", "", ErrInvalidProxyPath
 	}
 

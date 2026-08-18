@@ -109,13 +109,13 @@ func (l *Logger) getFile(sessionID string) (*os.File, error) {
 
 	// Create directory: <baseDir>/<upstream>/<YYYY-MM-DD>/
 	dateStr := time.Now().Format("2006-01-02")
-	logDir := filepath.Join(l.baseDir, upstream, dateStr)
+	logDir := filepath.Join(l.baseDir, safeStoragePathComponent(upstream), dateStr)
 	if err := ensurePrivateDir(logDir); err != nil {
 		return nil, err
 	}
 
 	// Open file for append
-	path := filepath.Join(logDir, sessionID+".jsonl")
+	path := filepath.Clean(filepath.Join(logDir, sessionID+".jsonl"))
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, ownerOnlyFileMode)
 	if err != nil {
 		return nil, err

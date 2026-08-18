@@ -82,10 +82,10 @@ func (sm *SessionManager) createNewSession(provider, upstream string) (string, i
 	sessionID := generateSessionID()
 	// New path structure: <upstream>/<YYYY-MM-DD>/<sessionID>.jsonl
 	dateStr := time.Now().Format("2006-01-02")
-	filePath := filepath.Join(upstream, dateStr, sessionID+".jsonl")
+	filePath := filepath.Join(safeStoragePathComponent(upstream), dateStr, sessionID+".jsonl")
 
 	// Create directory for upstream/date
-	logDir := filepath.Join(sm.baseDir, upstream, dateStr)
+	logDir := filepath.Join(sm.baseDir, safeStoragePathComponent(upstream), dateStr)
 	if err := ensurePrivateDir(logDir); err != nil {
 		return "", 0, false, err
 	}
@@ -102,10 +102,10 @@ func (sm *SessionManager) createNewSessionWithClientID(clientSessionID, provider
 	sessionID := generateSessionID()
 	// New path structure: <upstream>/<YYYY-MM-DD>/<sessionID>.jsonl
 	dateStr := time.Now().Format("2006-01-02")
-	filePath := filepath.Join(upstream, dateStr, sessionID+".jsonl")
+	filePath := filepath.Join(safeStoragePathComponent(upstream), dateStr, sessionID+".jsonl")
 
 	// Create directory for upstream/date
-	logDir := filepath.Join(sm.baseDir, upstream, dateStr)
+	logDir := filepath.Join(sm.baseDir, safeStoragePathComponent(upstream), dateStr)
 	if err := ensurePrivateDir(logDir); err != nil {
 		return "", 0, false, err
 	}
