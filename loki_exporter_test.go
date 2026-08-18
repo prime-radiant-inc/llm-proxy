@@ -62,7 +62,7 @@ func TestNewLokiExporter_DefaultValues(t *testing.T) {
 
 func TestNewLokiExporter_CustomValues(t *testing.T) {
 	cfg := LokiExporterConfig{
-		URL:         "http://localhost:3100/loki/api/v1/push",
+		URL:         "https://localhost:3100/loki/api/v1/push",
 		BatchSize:   500,
 		BatchWait:   2 * time.Second,
 		RetryMax:    3,

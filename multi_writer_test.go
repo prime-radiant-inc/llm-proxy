@@ -767,6 +767,7 @@ func TestMultiWriterExportsRedactedPayloadToLoki(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
+	defer server.CloseClientConnections()
 	defer server.Close()
 
 	exporter, err := NewLokiExporter(LokiExporterConfig{URL: server.URL, AllowInsecureHTTP: true, BatchSize: 1, BatchWait: time.Hour, UseGzip: false, ShutdownTimeout: time.Second})
