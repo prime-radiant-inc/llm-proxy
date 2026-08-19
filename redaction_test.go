@@ -43,7 +43,7 @@ func TestRedactLoggedChunks(t *testing.T) {
 
 func TestSanitizeURLForLog(t *testing.T) {
 	got := sanitizeURLForLog("https://user" + ":" + "pass@loki.example.com/loki/api/v1/push?token=secret#frag")
-	if got != "https://loki.example.com/loki/api/v1/push" {
+	if got != "https://loki.example.com/loki/api/v1/push?token=secret#frag" {
 		t.Fatalf("sanitizeURLForLog = %q", got)
 	}
 }

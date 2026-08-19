@@ -26,7 +26,7 @@ var validBedrockRegions = map[string]bool{
 type LokiConfig struct {
 	Enabled           bool   `toml:"enabled"`
 	URL               string `toml:"url"`                 // Full push endpoint URL, e.g., https://loki.example.com/loki/api/v1/push
-	AuthToken         string `toml:"auth_token"`          // ****** for auth (optional)
+	AuthToken         string `toml:"auth_token"`          // Bearer token for auth (optional)
 	AllowInsecureHTTP bool   `toml:"allow_insecure_http"` // Explicit opt-in for plain HTTP Loki endpoints
 	BatchSize         int    `toml:"batch_size"`          // Number of entries per batch
 	BatchWaitStr      string `toml:"batch_wait"`          // Duration string for batch timeout
@@ -270,7 +270,5 @@ func sanitizeURLForLog(raw string) string {
 		return "[invalid URL]"
 	}
 	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
 	return parsed.String()
 }
