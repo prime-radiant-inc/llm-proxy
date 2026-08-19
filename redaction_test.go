@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -42,8 +43,28 @@ func TestRedactLoggedChunks(t *testing.T) {
 }
 
 func TestSanitizeURLForLog(t *testing.T) {
-	got := sanitizeURLForLog("https://user" + ":" + "pass@loki.example.com/loki/api/v1/push?token=secret#frag")
-	if got != "https://loki.example.com/loki/api/v1/push?token=secret#frag" {
-		t.Fatalf("sanitizeURLForLog = %q", got)
+	got := sanitizeURLForLog("https://user" + ":" + "pass@loki.example.com/loki/api/v1/push?token=secret&stream=prod&note=Bearer+sk-ant-api03-abcdefghijklmnopqrstuvwxyz12345678#frag")
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("url.Parse(%q): %v", got, err)
+	}
+	if parsed.User != nil {
+		t.Fatalf("expected credentials to be stripped, got %v", parsed.User)
+	}
+	if parsed.Query().Get("token") != redactedSecretValue {
+		t.Fatalf("expected sensitive query value to be redacted, got %q", parsed.Query().Get("token"))
+	}
+	if parsed.Query().Get("stream") != "prod" {
+		t.Fatalf("expected non-sensitive query value to be preserved, got %q", parsed.Query().Get("stream"))
+	}
+	note := parsed.Query().Get("note")
+	if strings.Contains(note, "sk-ant-api03-abcdefghijklmnopqrstuvwxyz12345678") {
+		t.Fatalf("expected secret-like text in query value to be redacted, got %q", note)
+	}
+	if !strings.HasPrefix(note, "Bearer ") {
+		t.Fatalf("expected query value context to be preserved, got %q", note)
+	}
+	if parsed.Fragment != "frag" {
+		t.Fatalf("expected fragment to be preserved, got %q", parsed.Fragment)
 	}
 }

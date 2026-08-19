@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
@@ -264,11 +265,68 @@ func LoadConfig(configPath string) (Config, error) {
 	return cfg, nil
 }
 
+// sanitizeURLForLog removes embedded URL credentials and redacts sensitive query
+// parameter values before the URL is written to logs. It preserves the
+// non-sensitive host/path/query/fragment context needed for troubleshooting, and
+// also redacts secret-like token text that appears in query values or the
+// fragment.
 func sanitizeURLForLog(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "[invalid URL]"
 	}
 	parsed.User = nil
+	parsed.RawQuery = sanitizeURLQueryForLog(parsed.RawQuery)
+	parsed.Fragment = redactSecretLikeText(parsed.Fragment)
 	return parsed.String()
+}
+
+func sanitizeURLQueryForLog(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+
+	parts := strings.Split(rawQuery, "&")
+	for i, part := range parts {
+		key, value, hasValue := strings.Cut(part, "=")
+		if key == "" {
+			continue
+		}
+
+		decodedKey, err := url.QueryUnescape(key)
+		if err != nil {
+			decodedKey = key
+		}
+
+		if isSensitiveJSONField(decodedKey) {
+			if hasValue {
+				parts[i] = key + "=" + escapeQueryValueForLog(redactedSecretValue)
+			} else {
+				parts[i] = key
+			}
+			continue
+		}
+
+		if !hasValue || value == "" {
+			continue
+		}
+
+		decodedValue, err := url.QueryUnescape(value)
+		if err != nil {
+			continue
+		}
+		redactedValue := redactSecretLikeText(decodedValue)
+		if redactedValue != decodedValue {
+			parts[i] = key + "=" + escapeQueryValueForLog(redactedValue)
+		}
+	}
+
+	return strings.Join(parts, "&")
+}
+
+func escapeQueryValueForLog(value string) string {
+	escaped := url.QueryEscape(value)
+	escaped = strings.ReplaceAll(escaped, "%5B", "[")
+	escaped = strings.ReplaceAll(escaped, "%5D", "]")
+	return escaped
 }
