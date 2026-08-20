@@ -52,6 +52,11 @@ func TestParseProxyURL(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "reject upstream dot dot",
+			path:    "/anthropic/../v1/messages",
+			wantErr: true,
+		},
+		{
 			name:     "chatgpt backend api",
 			path:     "/openai/chatgpt.com/backend-api/codex/v1/responses",
 			wantProv: "openai",

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,16 +41,17 @@ type TokenData struct {
 
 // LokiExporterConfig holds configuration for the Loki exporter
 type LokiExporterConfig struct {
-	URL             string        // Full push endpoint URL
-	AuthToken       string        // Bearer token for auth (optional)
-	BatchSize       int           // Number of entries per batch
-	BatchWait       time.Duration // Duration to wait before flushing batch
-	RetryMax        int           // Maximum retry attempts
-	RetryWait       time.Duration // Base delay between retries
-	UseGzip         bool          // Enable gzip compression
-	Environment     string        // Environment label
-	BufferSize      int           // Channel buffer size
-	ShutdownTimeout time.Duration // Timeout for graceful shutdown
+	URL               string        // Full push endpoint URL
+	AuthToken         string        // ****** for auth (optional)
+	AllowInsecureHTTP bool          // Explicit opt-in for plain HTTP Loki endpoints
+	BatchSize         int           // Number of entries per batch
+	BatchWait         time.Duration // Duration to wait before flushing batch
+	RetryMax          int           // Maximum retry attempts
+	RetryWait         time.Duration // Base delay between retries
+	UseGzip           bool          // Enable gzip compression
+	Environment       string        // Environment label
+	BufferSize        int           // Channel buffer size
+	ShutdownTimeout   time.Duration // Timeout for graceful shutdown
 }
 
 // LokiStream represents a single stream in the Loki push request
@@ -122,6 +124,9 @@ func NewLokiExporter(cfg LokiExporterConfig) (*LokiExporter, error) {
 	if cfg.URL == "" {
 		return nil, fmt.Errorf("LokiExporter: URL is required")
 	}
+	if _, err := validateLokiURL(cfg.URL, cfg.AllowInsecureHTTP); err != nil {
+		return nil, err
+	}
 
 	// Apply defaults
 	if cfg.BatchSize <= 0 {
@@ -157,6 +162,27 @@ func NewLokiExporter(cfg LokiExporterConfig) (*LokiExporter, error) {
 	go exporter.run()
 
 	return exporter, nil
+}
+
+func validateLokiURL(raw string, allowInsecureHTTP bool) (*url.URL, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("LokiExporter: invalid URL %s", sanitizeURLForLog(raw))
+	}
+	if parsed.User != nil {
+		return nil, fmt.Errorf("LokiExporter: credentials in URL are not allowed for %s; use auth_token instead", sanitizeURLForLog(raw))
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return parsed, nil
+	case "http":
+		if allowInsecureHTTP {
+			return parsed, nil
+		}
+		return nil, fmt.Errorf("LokiExporter: plain HTTP requires allow_insecure_http=true for %s", sanitizeURLForLog(raw))
+	default:
+		return nil, fmt.Errorf("LokiExporter: unsupported URL scheme %q for %s", parsed.Scheme, sanitizeURLForLog(raw))
+	}
 }
 
 // extractExtendedLabels extracts additional low-cardinality labels from log entries.
@@ -793,14 +819,14 @@ func (e *LokiExporter) EmitTurnEnd(sessionID, provider, machine, stopReason stri
 	}
 
 	body := map[string]interface{}{
-		"turn_depth":                   patterns.TurnDepth,
-		"tool_streak":                  patterns.ToolStreak,
-		"retry_count":                  patterns.RetryCount,
-		"session_tool_count":           patterns.SessionToolCount,
-		"input_tokens":                 tokens.InputTokens,
-		"output_tokens":                tokens.OutputTokens,
-		"cache_read_input_tokens":      tokens.CacheReadInputTokens,
-		"cache_creation_input_tokens":  tokens.CacheCreationInputTokens,
+		"turn_depth":                  patterns.TurnDepth,
+		"tool_streak":                 patterns.ToolStreak,
+		"retry_count":                 patterns.RetryCount,
+		"session_tool_count":          patterns.SessionToolCount,
+		"input_tokens":                tokens.InputTokens,
+		"output_tokens":               tokens.OutputTokens,
+		"cache_read_input_tokens":     tokens.CacheReadInputTokens,
+		"cache_creation_input_tokens": tokens.CacheCreationInputTokens,
 	}
 
 	e.emitEvent(sessionID, provider, machine, LogTypeTurnEnd, labels, body)

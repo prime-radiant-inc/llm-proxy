@@ -110,7 +110,7 @@ func TestLoadConfigFromEnv_LokiEnabled(t *testing.T) {
 }
 
 func TestLoadConfigFromEnv_LokiURL(t *testing.T) {
-	testURL := "http://loki.example.com:3100/loki/api/v1/push"
+	testURL := "https://loki.example.com/loki/api/v1/push"
 	os.Setenv("LLM_PROXY_LOKI_URL", testURL)
 	defer os.Unsetenv("LLM_PROXY_LOKI_URL")
 
@@ -329,7 +329,7 @@ port = 12071
 
 [loki]
 enabled = true
-url = "http://loki:3100/loki/api/v1/push"
+url = "https://loki.example.com/loki/api/v1/push"
 auth_token = "my-token"
 batch_size = 2000
 batch_wait = "10s"
@@ -345,8 +345,8 @@ environment = "production"
 	if cfg.Loki.Enabled != true {
 		t.Errorf("expected Loki.Enabled true, got %v", cfg.Loki.Enabled)
 	}
-	if cfg.Loki.URL != "http://loki:3100/loki/api/v1/push" {
-		t.Errorf("expected Loki.URL 'http://loki:3100/loki/api/v1/push', got %q", cfg.Loki.URL)
+	if cfg.Loki.URL != "https://loki.example.com/loki/api/v1/push" {
+		t.Errorf("expected Loki.URL 'https://loki.example.com/loki/api/v1/push', got %q", cfg.Loki.URL)
 	}
 	if cfg.Loki.AuthToken != "my-token" {
 		t.Errorf("expected Loki.AuthToken 'my-token', got %q", cfg.Loki.AuthToken)
@@ -393,5 +393,46 @@ func TestLoadConfigFromTOML_AllowedUpstreamsAbsentIsEmpty(t *testing.T) {
 	}
 	if len(cfg.AllowedUpstreams) != 0 {
 		t.Errorf("expected empty AllowedUpstreams (default-open), got %v", cfg.AllowedUpstreams)
+	}
+}
+
+func TestDefaultConfig_ExploreListenHost(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.ExploreListenHost != "localhost" {
+		t.Fatalf("ExploreListenHost default = %q, want localhost", cfg.ExploreListenHost)
+	}
+	if cfg.Loki.AllowInsecureHTTP {
+		t.Fatal("Loki.AllowInsecureHTTP should default to false")
+	}
+}
+
+func TestLoadConfigFromEnv_ExploreListenHostAndLokiHTTPOptIn(t *testing.T) {
+	t.Setenv("LLM_PROXY_EXPLORE_LISTEN_HOST", "0.0.0.0")
+	t.Setenv("LLM_PROXY_LOKI_ALLOW_INSECURE_HTTP", "true")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+	if cfg.ExploreListenHost != "0.0.0.0" {
+		t.Fatalf("ExploreListenHost = %q, want 0.0.0.0", cfg.ExploreListenHost)
+	}
+	if !cfg.Loki.AllowInsecureHTTP {
+		t.Fatal("expected Loki.AllowInsecureHTTP from env")
+	}
+}
+
+func TestLoadConfigFromTOML_ExploreListenHostAndLokiHTTPOptIn(t *testing.T) {
+	cfg, err := LoadConfigFromTOML([]byte(`
+explore_listen_host = "127.0.0.1"
+
+[loki]
+allow_insecure_http = true
+`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ExploreListenHost != "127.0.0.1" {
+		t.Fatalf("ExploreListenHost = %q, want 127.0.0.1", cfg.ExploreListenHost)
+	}
+	if !cfg.Loki.AllowInsecureHTTP {
+		t.Fatal("expected Loki.AllowInsecureHTTP from TOML")
 	}
 }

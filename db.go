@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -27,6 +29,10 @@ type SessionDB struct {
 }
 
 func NewSessionDB(path string) (*SessionDB, error) {
+	if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("failed to create database directory: %w", err)
+	}
+
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
@@ -81,6 +87,13 @@ func NewSessionDB(path string) (*SessionDB, error) {
 
 	// Create index for client_session_id (may already exist from schema)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_sessions_client_id ON sessions(client_session_id)")
+
+	if _, err := os.Stat(path); err == nil {
+		if err := enforceOwnerOnlyFileMode(path); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to secure database permissions: %w", err)
+		}
+	}
 
 	return &SessionDB{db: db}, nil
 }

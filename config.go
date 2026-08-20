@@ -3,9 +3,11 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
@@ -23,14 +25,15 @@ var validBedrockRegions = map[string]bool{
 
 // LokiConfig holds configuration for Loki log export
 type LokiConfig struct {
-	Enabled      bool   `toml:"enabled"`
-	URL          string `toml:"url"`         // Full push endpoint URL, e.g., http://loki.example.com:3100/loki/api/v1/push
-	AuthToken    string `toml:"auth_token"`  // Bearer token for auth (optional)
-	BatchSize    int    `toml:"batch_size"`  // Number of entries per batch
-	BatchWaitStr string `toml:"batch_wait"`  // Duration string for batch timeout
-	RetryMax     int    `toml:"retry_max"`   // Maximum retry attempts
-	UseGzip      bool   `toml:"use_gzip"`    // Enable gzip compression
-	Environment  string `toml:"environment"` // Environment label (development, staging, production)
+	Enabled           bool   `toml:"enabled"`
+	URL               string `toml:"url"`                 // Full push endpoint URL, e.g., https://loki.example.com/loki/api/v1/push
+	AuthToken         string `toml:"auth_token"`          // Bearer token for auth (optional)
+	AllowInsecureHTTP bool   `toml:"allow_insecure_http"` // Explicit opt-in for plain HTTP Loki endpoints
+	BatchSize         int    `toml:"batch_size"`          // Number of entries per batch
+	BatchWaitStr      string `toml:"batch_wait"`          // Duration string for batch timeout
+	RetryMax          int    `toml:"retry_max"`           // Maximum retry attempts
+	UseGzip           bool   `toml:"use_gzip"`            // Enable gzip compression
+	Environment       string `toml:"environment"`         // Environment label (development, staging, production)
 }
 
 // APITokenSubstitutionConfig configures the opt-in API token substitution feature.
@@ -62,6 +65,7 @@ type Config struct {
 	Status                       bool                       `toml:"-"` // CLI-only, not persisted in config file
 	Explore                      bool                       `toml:"-"` // CLI-only, not persisted in config file
 	ExplorePort                  int                        `toml:"explore_port"`
+	ExploreListenHost            string                     `toml:"explore_listen_host"`
 	Loki                         LokiConfig                 `toml:"loki"`
 	ListenHost                   string                     `toml:"listen_host"`
 	APITokenSubstitution         APITokenSubstitutionConfig `toml:"api_token_substitution"`
@@ -84,7 +88,8 @@ func DefaultConfig() Config {
 			UseGzip:      true,
 			Environment:  "development",
 		},
-		ListenHost: "localhost",
+		ListenHost:        "localhost",
+		ExploreListenHost: "localhost",
 		APITokenSubstitution: APITokenSubstitutionConfig{
 			Enabled:     false,
 			CacheTTLStr: "5m",
@@ -179,6 +184,9 @@ func LoadConfigFromEnv(cfg Config) Config {
 	if authToken := os.Getenv("LLM_PROXY_LOKI_AUTH_TOKEN"); authToken != "" {
 		cfg.Loki.AuthToken = authToken
 	}
+	if v := os.Getenv("LLM_PROXY_LOKI_ALLOW_INSECURE_HTTP"); v != "" {
+		cfg.Loki.AllowInsecureHTTP = v == "true" || v == "1"
+	}
 	if batchSize := os.Getenv("LLM_PROXY_LOKI_BATCH_SIZE"); batchSize != "" {
 		if bs, err := strconv.Atoi(batchSize); err == nil {
 			cfg.Loki.BatchSize = bs
@@ -201,6 +209,9 @@ func LoadConfigFromEnv(cfg Config) Config {
 
 	if host := os.Getenv("LLM_PROXY_LISTEN_HOST"); host != "" {
 		cfg.ListenHost = host
+	}
+	if host := os.Getenv("LLM_PROXY_EXPLORE_LISTEN_HOST"); host != "" {
+		cfg.ExploreListenHost = host
 	}
 	if v := os.Getenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_ENABLED"); v != "" {
 		cfg.APITokenSubstitution.Enabled = v == "true" || v == "1"
@@ -252,4 +263,70 @@ func LoadConfig(configPath string) (Config, error) {
 	cfg = LoadConfigFromEnv(cfg)
 
 	return cfg, nil
+}
+
+// sanitizeURLForLog removes embedded URL credentials and redacts sensitive query
+// parameter values before the URL is written to logs. It preserves the
+// non-sensitive host/path/query/fragment context needed for troubleshooting, and
+// also redacts secret-like token text that appears in query values or the
+// fragment.
+func sanitizeURLForLog(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "[invalid URL]"
+	}
+	parsed.User = nil
+	parsed.RawQuery = sanitizeURLQueryForLog(parsed.RawQuery)
+	parsed.Fragment = redactSecretLikeText(parsed.Fragment)
+	return parsed.String()
+}
+
+func sanitizeURLQueryForLog(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+
+	parts := strings.Split(rawQuery, "&")
+	for i, part := range parts {
+		key, value, hasValue := strings.Cut(part, "=")
+		if key == "" {
+			continue
+		}
+
+		decodedKey, err := url.QueryUnescape(key)
+		if err != nil {
+			decodedKey = key
+		}
+
+		if isSensitiveJSONField(decodedKey) {
+			if hasValue {
+				parts[i] = key + "=" + escapeQueryValueForLog(redactedSecretValue)
+			} else {
+				parts[i] = key
+			}
+			continue
+		}
+
+		if !hasValue || value == "" {
+			continue
+		}
+
+		decodedValue, err := url.QueryUnescape(value)
+		if err != nil {
+			continue
+		}
+		redactedValue := redactSecretLikeText(decodedValue)
+		if redactedValue != decodedValue {
+			parts[i] = key + "=" + escapeQueryValueForLog(redactedValue)
+		}
+	}
+
+	return strings.Join(parts, "&")
+}
+
+func escapeQueryValueForLog(value string) string {
+	escaped := url.QueryEscape(value)
+	escaped = strings.ReplaceAll(escaped, "%5B", "[")
+	escaped = strings.ReplaceAll(escaped, "%5D", "]")
+	return escaped
 }

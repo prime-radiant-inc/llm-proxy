@@ -4,8 +4,11 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -710,4 +713,83 @@ func TestMultiWriterLogObservation(t *testing.T) {
 func computeSHA256(data []byte) string {
 	h := sha256.Sum256(data)
 	return hex.EncodeToString(h[:])
+}
+
+func TestMultiWriterRedactsRequestBodyBeforeLoki(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+
+	body := []byte(`{"api_key":"super-secret","messages":[{"role":"user","content":"******"}]}`)
+	headers := http.Header{"Authorization": {"******"}}
+	if err := mw.LogRequest("session-1", "anthropic", 1, "POST", "/v1/messages", headers, body, "req-1"); err != nil {
+		t.Fatalf("LogRequest: %v", err)
+	}
+	entry := lokiExporter.pushCalls[0].entry
+	bodyFromEntry := entry["body"].(string)
+	if strings.Contains(bodyFromEntry, "super-secret") || strings.Contains(bodyFromEntry, "abcdefghijklmnopqrstuvwxyz123456") {
+		t.Fatalf("Loki entry body was not redacted: %s", bodyFromEntry)
+	}
+	if got := entry["headers"].(http.Header).Get("Authorization"); got != "******" && got != redactedSecretValue {
+		t.Fatalf("Authorization header was not obfuscated: %q", got)
+	}
+	if sha := entry["request_sha"].(string); sha != computeSHA256([]byte(bodyFromEntry)) {
+		t.Fatalf("request_sha = %s, want hash of redacted body", sha)
+	}
+}
+
+func TestMultiWriterRedactsResponseChunksBeforeLoki(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+
+	chunks := []StreamChunk{{Timestamp: time.Now(), Raw: `data: {"refresh_token":"secret-refresh-token","text":"sk-ant-api03-abcdefghijklmnopqrstuvwxyz12345678"}`}}
+	headers := http.Header{"Set-Cookie": {"session=abc123"}}
+	if err := mw.LogResponse("session-1", "anthropic", 1, 200, headers, nil, chunks, ResponseTiming{}, "req-1", ResponseCapture{Termination: TerminationEOF}); err != nil {
+		t.Fatalf("LogResponse: %v", err)
+	}
+	entry := lokiExporter.pushCalls[0].entry
+	redacted := entry["chunks"].([]StreamChunk)[0].Raw
+	if strings.Contains(redacted, "secret-refresh-token") || strings.Contains(redacted, "abcdefghijklmnopqrstuvwxyz12345678") {
+		t.Fatalf("Loki response chunk was not redacted: %s", redacted)
+	}
+	if got := entry["headers"].(http.Header).Get("Set-Cookie"); got != redactedSecretValue {
+		t.Fatalf("Set-Cookie header = %q, want %q", got, redactedSecretValue)
+	}
+}
+
+func TestMultiWriterExportsRedactedPayloadToLoki(t *testing.T) {
+	var payload LokiPushRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Errorf("failed to decode payload: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.CloseClientConnections()
+	defer server.Close()
+
+	exporter, err := NewLokiExporter(LokiExporterConfig{URL: server.URL, AllowInsecureHTTP: true, BatchSize: 1, BatchWait: time.Hour, UseGzip: false, ShutdownTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("NewLokiExporter: %v", err)
+	}
+	defer exporter.Close()
+
+	mw := NewMultiWriter(newMockFileLogger(), exporter)
+	body := []byte(`{"client_secret":"super-secret","messages":[{"content":"sk-ant-api03-abcdefghijklmnopqrstuvwxyz12345678"}]}`)
+	if err := mw.LogRequest("session-1", "anthropic", 1, "POST", "/v1/messages", http.Header{}, body, "req-1"); err != nil {
+		t.Fatalf("LogRequest: %v", err)
+	}
+	if err := exporter.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if len(payload.Streams) != 1 || len(payload.Streams[0].Values) != 1 {
+		t.Fatalf("unexpected payload shape: %+v", payload)
+	}
+	line := payload.Streams[0].Values[0][1]
+	if strings.Contains(line, "super-secret") || strings.Contains(line, "abcdefghijklmnopqrstuvwxyz12345678") {
+		t.Fatalf("exported Loki payload was not redacted: %s", line)
+	}
 }

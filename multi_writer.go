@@ -176,8 +176,10 @@ func (m *MultiWriter) LogRequest(sessionID, provider string, seq int, method, pa
 	err := m.file.LogRequest(sessionID, provider, seq, method, path, headers, body, requestID)
 
 	if m.loki != nil {
-		// Compute SHA256 of raw request body for deterministic replay verification
-		bodyHash := sha256.Sum256(body)
+		redactedBody := RedactLoggedBody(body)
+
+		// Compute SHA256 of the persisted/exported request body representation.
+		bodyHash := sha256.Sum256([]byte(redactedBody))
 		bodySHA := hex.EncodeToString(bodyHash[:])
 
 		meta := map[string]interface{}{
@@ -195,7 +197,7 @@ func (m *MultiWriter) LogRequest(sessionID, provider string, seq int, method, pa
 			"method":      method,
 			"path":        path,
 			"headers":     ObfuscateHeaders(headers),
-			"body":        string(body),
+			"body":        redactedBody,
 			"size":        len(body),
 			"request_sha": bodySHA,
 			"_meta":       meta,
@@ -222,6 +224,8 @@ func (m *MultiWriter) LogResponse(sessionID, provider string, seq int, status in
 	err := m.file.LogResponse(sessionID, provider, seq, status, headers, body, chunks, timing, requestID, capture)
 
 	if m.loki != nil {
+		redactedChunks := RedactLoggedChunks(chunks)
+
 		meta := map[string]interface{}{
 			"ts":         time.Now().UTC().Format(time.RFC3339Nano),
 			"machine":    m.machineID,
@@ -234,16 +238,16 @@ func (m *MultiWriter) LogResponse(sessionID, provider string, seq int, status in
 			"type":    "response",
 			"seq":     seq,
 			"status":  status,
-			"headers": headers,
+			"headers": ObfuscateHeaders(headers),
 			"timing":  timing,
 			"size":    len(body),
 			"_meta":   meta,
 		}
 
 		if chunks != nil {
-			entry["chunks"] = chunks
+			entry["chunks"] = redactedChunks
 		} else {
-			entry["body"] = string(body)
+			entry["body"] = RedactLoggedBody(body)
 		}
 
 		if up, ok := m.upstreams.Load(sessionID); ok {

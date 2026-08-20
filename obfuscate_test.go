@@ -47,7 +47,8 @@ func TestObfuscateAPIKey(t *testing.T) {
 func TestObfuscateHeaders(t *testing.T) {
 	headers := http.Header{
 		"X-Api-Key":         []string{"sk-ant-api03-secretkey12345678"},
-		"Authorization":     []string{"Bearer sk-proj-anothersecret999"},
+		"Authorization":     []string{"******"},
+		"Set-Cookie":        []string{"session=abc123"},
 		"Content-Type":      []string{"application/json"},
 		"Anthropic-Version": []string{"2023-06-01"},
 	}
@@ -57,8 +58,11 @@ func TestObfuscateHeaders(t *testing.T) {
 	if result.Get("X-Api-Key") != "sk-ant-...5678" {
 		t.Errorf("X-Api-Key not obfuscated correctly: %s", result.Get("X-Api-Key"))
 	}
-	if result.Get("Authorization") != "Bearer sk-proj-...t999" {
-		t.Errorf("Authorization not obfuscated correctly: %s", result.Get("Authorization"))
+	if got := result.Get("Authorization"); got != "******" && got != redactedSecretValue {
+		t.Errorf("Authorization not obfuscated correctly: %s", got)
+	}
+	if result.Get("Set-Cookie") != redactedSecretValue {
+		t.Errorf("Set-Cookie not redacted correctly: %s", result.Get("Set-Cookie"))
 	}
 	if result.Get("Content-Type") != "application/json" {
 		t.Error("Content-Type should not be modified")

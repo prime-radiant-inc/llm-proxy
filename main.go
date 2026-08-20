@@ -18,17 +18,19 @@ import (
 )
 
 type CLIFlags struct {
-	Port        int
-	LogDir      string
-	ConfigPath  string
-	ServiceMode bool
-	SetupShell  bool
-	Env         bool
-	Setup       bool
-	Uninstall   bool
-	Status      bool
-	Explore     bool
-	ExplorePort int
+	Port              int
+	LogDir            string
+	ConfigPath        string
+	ListenHost        string
+	ServiceMode       bool
+	SetupShell        bool
+	Env               bool
+	Setup             bool
+	Uninstall         bool
+	Status            bool
+	Explore           bool
+	ExplorePort       int
+	ExploreListenHost string
 }
 
 func ParseCLIFlags(args []string) (CLIFlags, error) {
@@ -38,6 +40,7 @@ func ParseCLIFlags(args []string) (CLIFlags, error) {
 	fs.IntVar(&flags.Port, "port", 0, "Port to listen on")
 	fs.StringVar(&flags.LogDir, "log-dir", "", "Directory for log files")
 	fs.StringVar(&flags.ConfigPath, "config", "", "Path to config file")
+	fs.StringVar(&flags.ListenHost, "listen-host", "", "Host/interface to bind the proxy to (default: localhost)")
 	fs.BoolVar(&flags.ServiceMode, "service", false, "Run as background service (dynamic port, write portfile)")
 	fs.BoolVar(&flags.SetupShell, "setup-shell", false, "Configure shell integration and exit")
 	fs.BoolVar(&flags.Env, "env", false, "Output environment variables for shell eval and exit")
@@ -46,6 +49,7 @@ func ParseCLIFlags(args []string) (CLIFlags, error) {
 	fs.BoolVar(&flags.Status, "status", false, "Show proxy status and exit")
 	fs.BoolVar(&flags.Explore, "explore", false, "Start log explorer web UI")
 	fs.IntVar(&flags.ExplorePort, "explore-port", 12071, "Port for explorer web UI")
+	fs.StringVar(&flags.ExploreListenHost, "explore-listen-host", "", "Host/interface to bind the explorer to (default: localhost)")
 
 	if err := fs.Parse(args); err != nil {
 		return CLIFlags{}, err
@@ -88,6 +92,9 @@ func MergeConfig(cfg Config, flags CLIFlags) Config {
 	if flags.ServiceMode {
 		cfg.ServiceMode = true
 	}
+	if flags.ListenHost != "" {
+		cfg.ListenHost = flags.ListenHost
+	}
 	if flags.SetupShell {
 		cfg.SetupShell = true
 	}
@@ -108,6 +115,9 @@ func MergeConfig(cfg Config, flags CLIFlags) Config {
 	}
 	if flags.ExplorePort != 0 {
 		cfg.ExplorePort = flags.ExplorePort
+	}
+	if flags.ExploreListenHost != "" {
+		cfg.ExploreListenHost = flags.ExploreListenHost
 	}
 	return cfg
 }
@@ -222,7 +232,8 @@ func main() {
 
 		explorer := NewExplorer(logDir)
 
-		url := fmt.Sprintf("http://localhost:%d", port)
+		addr := listenAddr(cfg.ExploreListenHost, port)
+		url := fmt.Sprintf("http://%s", addr)
 		log.Printf("Starting LLM Proxy Explorer on %s", url)
 
 		// Auto-open browser (best effort, don't fail if it doesn't work)
@@ -231,7 +242,6 @@ func main() {
 			openBrowser(url)
 		}()
 
-		addr := fmt.Sprintf("localhost:%d", port)
 		if err := http.ListenAndServe(addr, explorer); err != nil {
 			log.Fatalf("Explorer server error: %v", err)
 		}
@@ -296,7 +306,7 @@ func main() {
 	log.Printf("Starting llm-proxy on %s", addr)
 	log.Printf("Log directory: %s", cfg.LogDir)
 	if cfg.Loki.Enabled {
-		log.Printf("Loki export: enabled (%s)", cfg.Loki.URL)
+		log.Printf("Loki export: enabled (%s)", sanitizeURLForLog(cfg.Loki.URL))
 	} else {
 		log.Printf("Loki export: disabled")
 	}
