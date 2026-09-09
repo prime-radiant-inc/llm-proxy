@@ -3,13 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/aws-sdk-go-v2/service/sts/types"
 )
 
 // staticCredentials provides fixed AWS credentials for signing tests.
@@ -34,6 +39,214 @@ func newTestPlatformProxy(region, workspaceID string) *Proxy {
 		signer:      v4.NewSigner(),
 	}
 	return p
+}
+
+type fakeAssumeRoleResult struct {
+	credentials *types.Credentials
+	err         error
+}
+
+type fakeAssumeRoleClient struct {
+	mu      sync.Mutex
+	results []fakeAssumeRoleResult
+	inputs  []sts.AssumeRoleInput
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f *fakeAssumeRoleClient) AssumeRole(_ context.Context, in *sts.AssumeRoleInput, _ ...func(*sts.Options)) (*sts.AssumeRoleOutput, error) {
+	f.mu.Lock()
+	call := len(f.inputs)
+	f.inputs = append(f.inputs, *in)
+	if call >= len(f.results) {
+		f.mu.Unlock()
+		return nil, errors.New("unexpected AssumeRole call")
+	}
+	result := f.results[call]
+	started := f.started
+	release := f.release
+	f.mu.Unlock()
+
+	if started != nil {
+		started <- struct{}{}
+	}
+	if release != nil {
+		<-release
+	}
+	if result.err != nil {
+		return nil, result.err
+	}
+	return &sts.AssumeRoleOutput{Credentials: result.credentials}, nil
+}
+
+func (f *fakeAssumeRoleClient) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.inputs)
+}
+
+func assumedCredentials(accessKeyID string, expiration time.Time) *types.Credentials {
+	return &types.Credentials{
+		AccessKeyId:     aws.String(accessKeyID),
+		SecretAccessKey: aws.String("assumed-secret"),
+		SessionToken:    aws.String("assumed-session-token"),
+		Expiration:      aws.Time(expiration),
+	}
+}
+
+func TestAssumeRoleCredentials_CachesAndUsesBoundedSession(t *testing.T) {
+	fake := &fakeAssumeRoleClient{results: []fakeAssumeRoleResult{{
+		credentials: assumedCredentials("ASIAFIRST", time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)),
+	}}}
+	provider := newPlatformAWSAssumeRoleCredentials(fake, "arn:aws:iam::123456789012:role/example-inference")
+
+	first, err := provider.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("first Retrieve: %v", err)
+	}
+	second, err := provider.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("second Retrieve: %v", err)
+	}
+
+	if first.AccessKeyID != "ASIAFIRST" || second.AccessKeyID != "ASIAFIRST" {
+		t.Fatalf("access keys = %q, %q; want cached ASIAFIRST", first.AccessKeyID, second.AccessKeyID)
+	}
+	if fake.callCount() != 1 {
+		t.Fatalf("AssumeRole calls = %d, want 1", fake.callCount())
+	}
+	fake.mu.Lock()
+	input := fake.inputs[0]
+	fake.mu.Unlock()
+	if got := aws.ToString(input.RoleArn); got != "arn:aws:iam::123456789012:role/example-inference" {
+		t.Errorf("RoleArn = %q, want configured role", got)
+	}
+	if got := aws.ToString(input.RoleSessionName); got != "llm-proxy-platform" {
+		t.Errorf("RoleSessionName = %q, want llm-proxy-platform", got)
+	}
+	if got := aws.ToInt32(input.DurationSeconds); got != 3600 {
+		t.Errorf("DurationSeconds = %d, want 3600", got)
+	}
+	if input.SourceIdentity != nil {
+		t.Errorf("SourceIdentity = %q, want unset", aws.ToString(input.SourceIdentity))
+	}
+}
+
+func TestAssumeRoleCredentials_RefreshesExpiredCredentials(t *testing.T) {
+	fake := &fakeAssumeRoleClient{results: []fakeAssumeRoleResult{
+		{credentials: assumedCredentials("ASIAEXPIRED", time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))},
+		{credentials: assumedCredentials("ASIAFRESH", time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC))},
+	}}
+	provider := newPlatformAWSAssumeRoleCredentials(fake, "arn:aws:iam::123456789012:role/model-inference")
+
+	first, err := provider.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("first Retrieve: %v", err)
+	}
+	second, err := provider.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("second Retrieve: %v", err)
+	}
+
+	if first.AccessKeyID != "ASIAEXPIRED" || second.AccessKeyID != "ASIAFRESH" {
+		t.Fatalf("access keys = %q, %q; want ASIAEXPIRED then ASIAFRESH", first.AccessKeyID, second.AccessKeyID)
+	}
+	if fake.callCount() != 2 {
+		t.Fatalf("AssumeRole calls = %d, want 2", fake.callCount())
+	}
+}
+
+func TestAssumeRoleCredentials_CoalescesConcurrentFirstRetrieval(t *testing.T) {
+	const callers = 12
+	fake := &fakeAssumeRoleClient{
+		results: []fakeAssumeRoleResult{{credentials: assumedCredentials("ASIASHARED", time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC))}},
+		started: make(chan struct{}, callers),
+		release: make(chan struct{}),
+	}
+	provider := newPlatformAWSAssumeRoleCredentials(fake, "arn:aws:iam::123456789012:role/model-inference")
+
+	start := make(chan struct{})
+	results := make(chan aws.Credentials, callers)
+	errs := make(chan error, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	for range callers {
+		go func() {
+			ready.Done()
+			<-start
+			credentials, err := provider.Retrieve(context.Background())
+			results <- credentials
+			errs <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	<-fake.started
+	close(fake.release)
+
+	for range callers {
+		if err := <-errs; err != nil {
+			t.Errorf("Retrieve: %v", err)
+		}
+		if got := (<-results).AccessKeyID; got != "ASIASHARED" {
+			t.Errorf("AccessKeyID = %q, want ASIASHARED", got)
+		}
+	}
+	if fake.callCount() != 1 {
+		t.Fatalf("AssumeRole calls = %d, want 1", fake.callCount())
+	}
+}
+
+func TestServeHTTP_PlatformAWS_AssumeRoleFailureIsOpaqueAndDoesNotSendUpstream(t *testing.T) {
+	const secretCanary = "sts-secret-canary"
+	fake := &fakeAssumeRoleClient{results: []fakeAssumeRoleResult{
+		{credentials: assumedCredentials("ASIAEXPIRED", time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))},
+		{err: errors.New(secretCanary)},
+	}}
+	credentials := newPlatformAWSAssumeRoleCredentials(fake, "arn:aws:iam::123456789012:role/model-inference")
+	if _, err := credentials.Retrieve(context.Background()); err != nil {
+		t.Fatalf("prime expired credentials: %v", err)
+	}
+	p := NewProxy()
+	p.platformAWS = &platformAWSState{
+		region:      "us-west-2",
+		workspaceID: "wrkspc_configured",
+		credProv:    credentials,
+		signer:      v4.NewSigner(),
+	}
+	upstreamCalls := 0
+	p.client = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		upstreamCalls++
+		return nil, errors.New("unexpected upstream request")
+	})}
+
+	req := httptest.NewRequest("POST", "/anthropic/api.anthropic.com/v1/messages", strings.NewReader(`{"messages":[]}`))
+	req.Header.Set("X-Api-Key", "client-key")
+	req.Header.Set("Anthropic-Workspace-Id", "wrkspc_client_override")
+	recorder := httptest.NewRecorder()
+	p.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(recorder.Body.String(), secretCanary) {
+		t.Errorf("response leaked credential error: %q", recorder.Body.String())
+	}
+	if got := recorder.Body.String(); got != "platform-aws signing failed\n" {
+		t.Errorf("response body = %q, want opaque signing failure", got)
+	}
+	if upstreamCalls != 0 {
+		t.Errorf("upstream calls = %d, want 0", upstreamCalls)
+	}
+	if fake.callCount() != 2 {
+		t.Errorf("AssumeRole calls = %d, want 2", fake.callCount())
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestApplyPlatformAWS_RewritesUpstreamAndSigns(t *testing.T) {
@@ -189,6 +402,7 @@ func TestServeHTTP_PlatformAWS_SignedRoundTrip(t *testing.T) {
 	req := httptest.NewRequest("POST", "/anthropic/api.anthropic.com/v1/messages", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Api-Key", "sk-should-be-dropped")
+	req.Header.Set("Anthropic-Workspace-Id", "wrkspc_client_override")
 	req.Header.Set("Anthropic-Version", "2023-06-01")
 	req.Header.Set("Anthropic-Beta", "cache-diagnosis-2026-04-07,model-context-window-exceeded-2025-08-26")
 

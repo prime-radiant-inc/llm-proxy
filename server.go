@@ -99,7 +99,7 @@ func NewServer(cfg Config) (*Server, error) {
 
 	// Initialize Claude Platform on AWS signing if configured. Partial config
 	// fails loudly here rather than silently falling back to first-party.
-	if err := ValidatePlatformAWSConfig(cfg.AnthropicAWSMode, cfg.AnthropicAWSRegion, cfg.AnthropicAWSWorkspaceID); err != nil {
+	if err := ValidatePlatformAWSConfig(cfg.AnthropicAWSMode, cfg.AnthropicAWSRegion, cfg.AnthropicAWSWorkspaceID, cfg.AnthropicAWSRoleARN); err != nil {
 		if lokiExporter != nil {
 			lokiExporter.Close()
 		}
@@ -108,7 +108,7 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	if cfg.AnthropicAWSMode == platformAWSMode {
-		platformAWS, platformErr := initPlatformAWS(cfg.AnthropicAWSRegion, cfg.AnthropicAWSWorkspaceID)
+		platformAWS, platformErr := initPlatformAWS(cfg.AnthropicAWSRegion, cfg.AnthropicAWSWorkspaceID, cfg.AnthropicAWSRoleARN)
 		if platformErr != nil {
 			if lokiExporter != nil {
 				lokiExporter.Close()

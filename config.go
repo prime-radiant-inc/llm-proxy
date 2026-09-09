@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
@@ -13,6 +14,11 @@ import (
 // validAWSRegion matches an AWS region identifier (e.g. us-west-2). It guards the
 // region before it is interpolated into the Claude Platform on AWS hostname.
 var validAWSRegion = regexp.MustCompile(`^[a-z]{2}-[a-z]+-[0-9]+$`)
+
+var (
+	validIAMRoleARN  = regexp.MustCompile(`^arn:aws(?:-[a-z0-9]+)*:iam::[0-9]{12}:role/(.+)$`)
+	validIAMRoleName = regexp.MustCompile(`^[A-Za-z0-9_+=,.@-]+$`)
+)
 
 // validBedrockRegions lists AWS regions where Bedrock is available for Claude models.
 var validBedrockRegions = map[string]bool{
@@ -48,11 +54,12 @@ type Config struct {
 	LogDirConfigured bool   `toml:"-"`
 	BedrockRegion    string `toml:"bedrock_region"` // AWS region for Bedrock (empty = disabled)
 	// Claude Platform on AWS: SigV4-signed forwarding of anthropic passthrough
-	// traffic. All three empty = disabled (first-party passthrough). Partial
+	// traffic. Empty mode and no role = disabled (first-party passthrough). Partial
 	// config fails loudly at startup (see ValidatePlatformAWSConfig).
 	AnthropicAWSMode             string                     `toml:"anthropic_aws_mode"`         // "platform" enables
 	AnthropicAWSRegion           string                     `toml:"anthropic_aws_region"`       // e.g. us-west-2
 	AnthropicAWSWorkspaceID      string                     `toml:"anthropic_aws_workspace_id"` // wrkspc_...
+	AnthropicAWSRoleARN          string                     `toml:"anthropic_aws_role_arn"`     // optional IAM role for Platform signing
 	MantleRequireCloudBuildRunID bool                       `toml:"mantle_require_cloud_build_run_id"`
 	ServiceMode                  bool                       `toml:"-"` // CLI-only, not persisted in config file
 	SetupShell                   bool                       `toml:"-"` // CLI-only, not persisted in config file
@@ -122,13 +129,16 @@ func ValidateBedrockRegion(region string) error {
 }
 
 // ValidatePlatformAWSConfig validates the Claude Platform on AWS settings. The
-// mode is the sole switch: empty or "off" disables cleanly regardless of the
-// region/workspace vars (so a rollback is just blanking ANTHROPIC_AWS_MODE). Only
-// mode "platform" requires a well-formed region and a workspace ID. Any other
+// mode selects Platform: empty or "off" disables cleanly when no role is set,
+// regardless of leftover region/workspace values. A role requires Platform mode.
+// Only mode "platform" requires a well-formed region and workspace ID; any other
 // mode value is a loud error.
-func ValidatePlatformAWSConfig(mode, region, workspaceID string) error {
+func ValidatePlatformAWSConfig(mode, region, workspaceID, roleARN string) error {
 	switch mode {
 	case "", platformAWSModeOff:
+		if roleARN != "" {
+			return fmt.Errorf("ANTHROPIC_AWS_ROLE_ARN requires ANTHROPIC_AWS_MODE=%s", platformAWSMode)
+		}
 		return nil
 	case platformAWSMode:
 		if region == "" || workspaceID == "" {
@@ -137,10 +147,43 @@ func ValidatePlatformAWSConfig(mode, region, workspaceID string) error {
 		if !validAWSRegion.MatchString(region) {
 			return fmt.Errorf("invalid ANTHROPIC_AWS_REGION %q", region)
 		}
+		if roleARN != "" && !isValidIAMRoleARN(roleARN) {
+			return fmt.Errorf("invalid ANTHROPIC_AWS_ROLE_ARN %q", roleARN)
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown ANTHROPIC_AWS_MODE %q (want %q or empty/%q)", mode, platformAWSMode, platformAWSModeOff)
 	}
+}
+
+func isValidIAMRoleARN(roleARN string) bool {
+	match := validIAMRoleARN.FindStringSubmatch(roleARN)
+	if match == nil {
+		return false
+	}
+
+	parts := strings.Split(match[1], "/")
+	if len(parts) == 0 {
+		return false
+	}
+	roleName := parts[len(parts)-1]
+	if len(roleName) > 64 || !validIAMRoleName.MatchString(roleName) {
+		return false
+	}
+
+	pathLength := 1
+	for _, part := range parts[:len(parts)-1] {
+		if part == "" {
+			return false
+		}
+		for _, character := range part {
+			if character < '!' || character > '~' {
+				return false
+			}
+		}
+		pathLength += len(part) + 1
+	}
+	return pathLength <= 512
 }
 
 func LoadConfigFromEnv(cfg Config) Config {
@@ -164,6 +207,9 @@ func LoadConfigFromEnv(cfg Config) Config {
 	}
 	if workspaceID := os.Getenv("ANTHROPIC_AWS_WORKSPACE_ID"); workspaceID != "" {
 		cfg.AnthropicAWSWorkspaceID = workspaceID
+	}
+	if roleARN := os.Getenv("ANTHROPIC_AWS_ROLE_ARN"); roleARN != "" {
+		cfg.AnthropicAWSRoleARN = roleARN
 	}
 	if v := os.Getenv("LLM_PROXY_MANTLE_REQUIRE_CLOUD_BUILD_RUN_ID"); v != "" {
 		cfg.MantleRequireCloudBuildRunID = v == "true" || v == "1"

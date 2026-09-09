@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Public Repository Data
+
+Use fictitious identifiers in tests and examples, including AWS account
+`123456789012` and generic role names. Keep live account IDs, deployment names,
+private ticket links, local user paths, and internal work reports out of source,
+commit messages, and pull request descriptions. Check all commits being published,
+not just the final diff. Keep private agent work notes in the ignored `.superpowers/`
+directory.
+
 ## Constitution
 
 All code must follow the architectural rules and patterns defined in:
@@ -112,9 +121,10 @@ Sessions are tracked via `client_session_id` extracted from request bodies (e.g.
 | `LLM_PROXY_LOKI_USE_GZIP` | Enable gzip compression (`true` or `1`, default: true) |
 | `LLM_PROXY_LOKI_ENVIRONMENT` | Environment label for Grafana filtering |
 | `BEDROCK_REGION` | AWS region for Bedrock (e.g., `us-west-2`). Enables Bedrock signing proxy mode |
-| `ANTHROPIC_AWS_MODE` | Set to `platform` to SigV4-sign anthropic passthrough traffic to Claude Platform on AWS instead of first-party Anthropic (requires `ANTHROPIC_AWS_REGION` and `ANTHROPIC_AWS_WORKSPACE_ID`). Empty or `off` = first-party passthrough (default); disables cleanly even if region/workspace remain set, so rollback is just blanking this var |
+| `ANTHROPIC_AWS_MODE` | Set to `platform` to SigV4-sign anthropic passthrough traffic to Claude Platform on AWS instead of first-party Anthropic (requires `ANTHROPIC_AWS_REGION` and `ANTHROPIC_AWS_WORKSPACE_ID`). Empty or `off` = first-party passthrough (default); disables cleanly when no role is configured |
 | `ANTHROPIC_AWS_REGION` | AWS region for Claude Platform on AWS (e.g., `us-west-2`) |
 | `ANTHROPIC_AWS_WORKSPACE_ID` | Anthropic workspace id (`wrkspc_...`) sent as the `anthropic-workspace-id` header |
+| `ANTHROPIC_AWS_ROLE_ARN` | Optional IAM role assumed only for Platform request signing. Credentials renew automatically from the default AWS credential chain with sessions limited to one hour. Assume-role or refresh failures fail the request without falling back to the source credentials |
 
 ## File Locations
 
