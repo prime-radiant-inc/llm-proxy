@@ -12,12 +12,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 // platformAWSMode selects SigV4-signed forwarding to Claude Platform on AWS.
 // platformAWSModeOff and the empty string both disable it (first-party
-// passthrough) regardless of the region/workspace vars, so a rollback is just
-// blanking ANTHROPIC_AWS_MODE.
+// passthrough) regardless of the region/workspace vars. A rollback must clear
+// ANTHROPIC_AWS_ROLE_ARN before blanking or disabling ANTHROPIC_AWS_MODE.
 const (
 	platformAWSMode    = "platform"
 	platformAWSModeOff = "off"
@@ -38,10 +40,10 @@ type platformAWSState struct {
 	signer      *v4.Signer
 }
 
-// initPlatformAWS initializes platform-on-AWS signing resources. Uses the default
-// AWS credential chain (instance role on the box, env/profile creds in dev),
-// matching initBedrock.
-func initPlatformAWS(region, workspaceID string) (*platformAWSState, error) {
+// initPlatformAWS initializes platform-on-AWS signing resources. The default AWS
+// credential chain remains the source identity. When roleARN is set, only cached,
+// renewing credentials for that role are used to sign Platform requests.
+func initPlatformAWS(region, workspaceID, roleARN string) (*platformAWSState, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -50,12 +52,25 @@ func initPlatformAWS(region, workspaceID string) (*platformAWSState, error) {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
 
+	credentials := cfg.Credentials
+	if roleARN != "" {
+		credentials = newPlatformAWSAssumeRoleCredentials(sts.NewFromConfig(cfg), roleARN)
+	}
+
 	return &platformAWSState{
 		region:      region,
 		workspaceID: workspaceID,
-		credProv:    cfg.Credentials,
+		credProv:    credentials,
 		signer:      v4.NewSigner(),
 	}, nil
+}
+
+func newPlatformAWSAssumeRoleCredentials(client stscreds.AssumeRoleAPIClient, roleARN string) aws.CredentialsProvider {
+	provider := stscreds.NewAssumeRoleProvider(client, roleARN, func(options *stscreds.AssumeRoleOptions) {
+		options.Duration = time.Hour
+		options.RoleSessionName = "llm-proxy-platform"
+	})
+	return aws.NewCredentialsCache(provider)
 }
 
 // applyPlatformAWS rewrites an outbound anthropic passthrough request to target

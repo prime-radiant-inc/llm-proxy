@@ -277,6 +277,7 @@ func TestLoadConfigFromEnv_PlatformAWS(t *testing.T) {
 	t.Setenv("ANTHROPIC_AWS_MODE", "platform")
 	t.Setenv("ANTHROPIC_AWS_REGION", "us-west-2")
 	t.Setenv("ANTHROPIC_AWS_WORKSPACE_ID", "wrkspc_abc")
+	t.Setenv("ANTHROPIC_AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/example-inference")
 
 	cfg := LoadConfigFromEnv(DefaultConfig())
 
@@ -289,6 +290,19 @@ func TestLoadConfigFromEnv_PlatformAWS(t *testing.T) {
 	if cfg.AnthropicAWSWorkspaceID != "wrkspc_abc" {
 		t.Errorf("AnthropicAWSWorkspaceID = %q, want 'wrkspc_abc'", cfg.AnthropicAWSWorkspaceID)
 	}
+	if cfg.AnthropicAWSRoleARN != "arn:aws:iam::123456789012:role/example-inference" {
+		t.Errorf("AnthropicAWSRoleARN = %q, want configured role ARN", cfg.AnthropicAWSRoleARN)
+	}
+}
+
+func TestLoadConfigFromTOML_PlatformAWSRoleARN(t *testing.T) {
+	cfg, err := LoadConfigFromTOML([]byte(`anthropic_aws_role_arn = "arn:aws:iam::123456789012:role/path/model-inference"`))
+	if err != nil {
+		t.Fatalf("LoadConfigFromTOML: %v", err)
+	}
+	if cfg.AnthropicAWSRoleARN != "arn:aws:iam::123456789012:role/path/model-inference" {
+		t.Errorf("AnthropicAWSRoleARN = %q, want configured role ARN", cfg.AnthropicAWSRoleARN)
+	}
 }
 
 func TestValidatePlatformAWSConfig(t *testing.T) {
@@ -297,27 +311,39 @@ func TestValidatePlatformAWSConfig(t *testing.T) {
 		mode        string
 		region      string
 		workspaceID string
+		roleARN     string
 		wantErr     bool
 	}{
-		{"all empty = disabled", "", "", "", false},
-		{"fully configured", "platform", "us-west-2", "wrkspc_1", false},
-		{"missing region", "platform", "", "wrkspc_1", true},
-		{"missing workspace", "platform", "us-west-2", "", true},
-		{"mode only, no region/workspace", "platform", "", "", true},
-		{"unknown mode", "bogus", "us-west-2", "wrkspc_1", true},
-		{"invalid region format", "platform", "us_west_2", "wrkspc_1", true},
-		{"region injection", "platform", "us-west-2/../evil", "wrkspc_1", true},
+		{"all empty = disabled", "", "", "", "", false},
+		{"fully configured without role", "platform", "us-west-2", "wrkspc_1", "", false},
+		{"fully configured with role", "platform", "us-west-2", "wrkspc_1", "arn:aws:iam::123456789012:role/example-inference", false},
+		{"role with path", "platform", "us-west-2", "wrkspc_1", "arn:aws:iam::123456789012:role/team/models/inference_role", false},
+		{"missing region", "platform", "", "wrkspc_1", "", true},
+		{"missing workspace", "platform", "us-west-2", "", "", true},
+		{"mode only, no region/workspace", "platform", "", "", "", true},
+		{"unknown mode", "bogus", "us-west-2", "wrkspc_1", "", true},
+		{"invalid region format", "platform", "us_west_2", "wrkspc_1", "", true},
+		{"region injection", "platform", "us-west-2/../evil", "wrkspc_1", "", true},
+		{"role with empty mode", "", "us-west-2", "wrkspc_1", "arn:aws:iam::123456789012:role/model-inference", true},
+		{"role with off mode", "off", "us-west-2", "wrkspc_1", "arn:aws:iam::123456789012:role/model-inference", true},
+		{"role missing ARN", "platform", "us-west-2", "wrkspc_1", "model-inference", true},
+		{"non-IAM ARN", "platform", "us-west-2", "wrkspc_1", "arn:aws:sts::123456789012:role/model-inference", true},
+		{"non-role ARN", "platform", "us-west-2", "wrkspc_1", "arn:aws:iam::123456789012:user/model-inference", true},
+		{"role account is not twelve digits", "platform", "us-west-2", "wrkspc_1", "arn:aws:iam::1234:role/model-inference", true},
+		{"role name is empty", "platform", "us-west-2", "wrkspc_1", "arn:aws:iam::123456789012:role/", true},
+		{"role path has empty segment", "platform", "us-west-2", "wrkspc_1", "arn:aws:iam::123456789012:role/team//model-inference", true},
+		{"role name contains illegal character", "platform", "us-west-2", "wrkspc_1", "arn:aws:iam::123456789012:role/model inference", true},
 		// Rollback ergonomics: blanking mode disables cleanly even if region and
 		// workspace are still set, so a rollback is just blanking ANTHROPIC_AWS_MODE.
-		{"empty mode with leftover region+workspace disables", "", "us-west-2", "wrkspc_1", false},
-		{"off mode with leftover region+workspace disables", "off", "us-west-2", "wrkspc_1", false},
+		{"empty mode with leftover region+workspace disables", "", "us-west-2", "wrkspc_1", "", false},
+		{"off mode with leftover region+workspace disables", "off", "us-west-2", "wrkspc_1", "", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidatePlatformAWSConfig(tt.mode, tt.region, tt.workspaceID)
+			err := ValidatePlatformAWSConfig(tt.mode, tt.region, tt.workspaceID, tt.roleARN)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ValidatePlatformAWSConfig(%q, %q, %q) error = %v, wantErr %v", tt.mode, tt.region, tt.workspaceID, err, tt.wantErr)
+				t.Errorf("ValidatePlatformAWSConfig(%q, %q, %q, %q) error = %v, wantErr %v", tt.mode, tt.region, tt.workspaceID, tt.roleARN, err, tt.wantErr)
 			}
 		})
 	}

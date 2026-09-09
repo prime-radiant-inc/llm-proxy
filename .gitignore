@@ -19,3 +19,6 @@ echo
 
 # Spectacular parallel execution worktrees
 .worktrees/
+
+# Private agent work notes
+.superpowers/
