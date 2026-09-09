@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +18,7 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/aws-sdk-go-v2/service/sts/types"
+	"github.com/aws/smithy-go"
 )
 
 // staticCredentials provides fixed AWS credentials for signing tests.
@@ -240,6 +244,141 @@ func TestServeHTTP_PlatformAWS_AssumeRoleFailureIsOpaqueAndDoesNotSendUpstream(t
 	}
 	if fake.callCount() != 2 {
 		t.Errorf("AssumeRole calls = %d, want 2", fake.callCount())
+	}
+}
+
+func TestServeHTTP_PlatformAWS_AssumeRoleFailureClosesCaptureWithoutLeakingSecrets(t *testing.T) {
+	const secretCanary = "sts-secret-canary"
+	for _, tc := range []struct {
+		name           string
+		primeExpired   bool
+		err            error
+		wantDiagnostic string
+	}{
+		{
+			name:           "initial access denied",
+			err:            &smithy.GenericAPIError{Code: "AccessDenied", Message: secretCanary, Fault: smithy.FaultClient},
+			wantDiagnostic: "AWS AccessDenied",
+		},
+		{
+			name: "refresh expired token", primeExpired: true,
+			err:            &smithy.GenericAPIError{Code: "ExpiredToken", Message: secretCanary + " ASIAEXPIRED assumed-secret assumed-session-token", Fault: smithy.FaultClient},
+			wantDiagnostic: "AWS ExpiredToken",
+		},
+		{
+			name:           "network failure",
+			err:            &net.OpError{Op: "dial", Net: "tcp", Err: errors.New(secretCanary)},
+			wantDiagnostic: "network error",
+		},
+		{
+			name:           "deadline exceeded",
+			err:            fmt.Errorf("%s: %w", secretCanary, context.DeadlineExceeded),
+			wantDiagnostic: "deadline exceeded",
+		},
+		{
+			name:           "request canceled",
+			err:            fmt.Errorf("%s: %w", secretCanary, context.Canceled),
+			wantDiagnostic: "request canceled",
+		},
+		{
+			name:           "unrecognized AWS error code",
+			err:            &smithy.GenericAPIError{Code: secretCanary, Message: secretCanary, Fault: smithy.FaultUnknown},
+			wantDiagnostic: "AWS API error",
+		},
+		{
+			name:           "unknown provider failure",
+			err:            errors.New(secretCanary),
+			wantDiagnostic: "credential or signing error",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeAssumeRoleClient{}
+			if tc.primeExpired {
+				fake.results = append(fake.results, fakeAssumeRoleResult{
+					credentials: assumedCredentials("ASIAEXPIRED", time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)),
+				})
+			}
+			fake.results = append(fake.results, fakeAssumeRoleResult{err: tc.err})
+			credentials := newPlatformAWSAssumeRoleCredentials(fake, "arn:aws:iam::123456789012:role/model-inference")
+			if tc.primeExpired {
+				if _, err := credentials.Retrieve(context.Background()); err != nil {
+					t.Fatalf("prime expired credentials: %v", err)
+				}
+			}
+
+			logger, err := NewLogger(t.TempDir())
+			if err != nil {
+				t.Fatalf("NewLogger: %v", err)
+			}
+			defer logger.Close()
+			var diagnostics bytes.Buffer
+			previousLogWriter := log.Writer()
+			log.SetOutput(&diagnostics)
+			defer log.SetOutput(previousLogWriter)
+
+			p := newTestPlatformProxy("us-west-2", "wrkspc_configured")
+			p.platformAWS.credProv = credentials
+			p.logger = logger
+			upstreamCalls := 0
+			p.client.Transport = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				upstreamCalls++
+				return nil, errors.New("unexpected upstream request")
+			})
+			req := httptest.NewRequest("POST", "/anthropic/api.anthropic.com/v1/messages", strings.NewReader(`{"messages":[]}`))
+			recorder := httptest.NewRecorder()
+			p.ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusInternalServerError || recorder.Body.String() != "platform-aws signing failed\n" {
+				t.Errorf("response = %d %q, want opaque 500", recorder.Code, recorder.Body.String())
+			}
+			if upstreamCalls != 0 {
+				t.Errorf("upstream calls = %d, want 0", upstreamCalls)
+			}
+			if got := fake.callCount(); got != len(fake.results) {
+				t.Errorf("AssumeRole calls = %d, want %d", got, len(fake.results))
+			}
+
+			entries := readObservationLogEntries(t, logger)
+			var requests []map[string]any
+			for _, entry := range entries {
+				if entry["type"] == "request" {
+					requests = append(requests, entry)
+				}
+			}
+			responses := filterResponseEntries(entries)
+			if len(requests) != 1 || len(responses) != 1 {
+				t.Fatalf("captured %d requests and %d responses, want one matched pair", len(requests), len(responses))
+			}
+			request, response := requests[0], responses[0]
+			requestMeta := request["_meta"].(map[string]any)
+			responseMeta := response["_meta"].(map[string]any)
+			for _, key := range []string{"session", "request_id"} {
+				if value, ok := requestMeta[key].(string); !ok || value == "" || responseMeta[key] != value {
+					t.Errorf("capture %s does not match: request=%v response=%v", key, requestMeta[key], responseMeta[key])
+				}
+			}
+			if response["seq"] != request["seq"] || response["path"] != "/v1/messages" {
+				t.Errorf("response lost request sequence or path: %v", response)
+			}
+			if response["status"] != float64(0) || response["size"] != float64(0) || response["body"] != "" || response["chunks"] != nil {
+				t.Errorf("response must record no upstream status or bytes: %v", response)
+			}
+			if response["termination"] != "upstream_unreachable" {
+				t.Errorf("termination = %v, want upstream_unreachable", response["termination"])
+			}
+			if diagnostic, ok := response["termination_error"].(string); !ok || !strings.Contains(diagnostic, tc.wantDiagnostic) {
+				t.Errorf("capture diagnostic = %v, want %s", response["termination_error"], tc.wantDiagnostic)
+			}
+			if !strings.Contains(diagnostics.String(), tc.wantDiagnostic) || !strings.Contains(diagnostics.String(), requestMeta["request_id"].(string)) {
+				t.Errorf("operational diagnostic must include failure category and request ID: %q", diagnostics.String())
+			}
+			_, captureData := readObservationLogFile(t, logger)
+			for _, secret := range []string{secretCanary, "ASIAEXPIRED", "assumed-secret", "assumed-session-token"} {
+				if strings.Contains(string(captureData), secret) || strings.Contains(diagnostics.String(), secret) || strings.Contains(recorder.Body.String(), secret) {
+					t.Errorf("credential failure leaked %q into capture, diagnostics, or client output", secret)
+				}
+			}
+		})
 	}
 }
 

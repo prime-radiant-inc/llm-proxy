@@ -540,6 +540,16 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 	// named them, so session identity is preserved.
 	if p.platformAWS != nil && provider == "anthropic" {
 		if err := p.applyPlatformAWS(proxyReq, reqBody); err != nil {
+			diagnostic := "platform-aws signing failed: " + platformAWSErrorSummary(err)
+			log.Printf("%s (request_id=%s)", diagnostic, requestID)
+			if shouldLog {
+				timing := ResponseTiming{TotalMs: time.Since(startTime).Milliseconds()}
+				p.logger.LogResponse(sessionID, provider, seq, 0, nil, nil, nil, timing, requestID, ResponseCapture{
+					Path:             path,
+					Termination:      TerminationUpstreamUnreachable,
+					TerminationError: diagnostic,
+				})
+			}
 			http.Error(w, "platform-aws signing failed", http.StatusInternalServerError)
 			return
 		}

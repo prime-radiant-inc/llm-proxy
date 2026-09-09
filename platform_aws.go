@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +16,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/smithy-go"
 )
 
 // platformAWSMode selects SigV4-signed forwarding to Claude Platform on AWS.
@@ -112,6 +115,34 @@ func (p *Proxy) applyPlatformAWS(proxyReq *http.Request, reqBody []byte) error {
 		return fmt.Errorf("sign request: %w", err)
 	}
 	return nil
+}
+
+// platformAWSErrorSummary preserves actionable failure categories without
+// logging provider messages, which may contain credentials or response bodies.
+func platformAWSErrorSummary(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "request canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline exceeded"
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		// Error codes also come from the provider, so only known codes are safe
+		// to emit. Unknown codes must not become a second error-message channel.
+		switch code := apiErr.ErrorCode(); code {
+		case "AccessDenied", "AccessDeniedException", "ExpiredToken", "ExpiredTokenException",
+			"InvalidClientTokenId", "SignatureDoesNotMatch", "Throttling", "ThrottlingException":
+			return "AWS " + code
+		default:
+			return "AWS API error"
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return "network error"
+	}
+	return "credential or signing error"
 }
 
 // sha256Hex returns the hex-encoded SHA256 of the payload, the form SigV4 uses
