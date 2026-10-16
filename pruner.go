@@ -38,6 +38,10 @@ type Pruner struct {
 	maxBytes      int64
 	interval      time.Duration
 	activeFiles   func() map[string]struct{}
+	// removeFile deletes a single log file. Defaults to os.Remove; tests in
+	// this package override it to inject latency or failures without
+	// touching the real filesystem semantics.
+	removeFile func(string) error
 
 	mu      sync.Mutex
 	started bool
@@ -64,13 +68,17 @@ func NewPruner(baseDir string, retentionDays int, maxBytes int64, interval time.
 		maxBytes:      maxBytes,
 		interval:      interval,
 		activeFiles:   activeFiles,
+		removeFile:    os.Remove,
 	}
 }
 
-// Start runs one prune pass immediately and synchronously - so its effects
-// (including the summary log line) are complete before Start returns, with
-// no observable race against whatever the caller does right after - then one
-// more every interval in the background, until Stop is called. A second call
+// Start returns immediately; it never runs a prune pass on the calling
+// goroutine. The first pass (and every one after it, every interval) runs
+// on a background goroutine. This matters on a box sitting on months of
+// unpruned logs: a first pass there can be tens of thousands of deletes,
+// and NewServer calls Start while constructing the Server that answers
+// /health - a synchronous first pass there would hold up startup health
+// checks for however long that pass takes (PRI-3457 review). A second call
 // to Start is a no-op (idempotent).
 func (p *Pruner) Start() {
 	p.mu.Lock()
@@ -84,10 +92,13 @@ func (p *Pruner) Start() {
 	stopCh, doneCh := p.stopCh, p.doneCh
 	p.mu.Unlock()
 
-	p.runAndLog()
-
 	go func() {
 		defer close(doneCh)
+		// First pass runs here too, on this goroutine, not on the caller's.
+		// If Stop is called while this is still running, Stop simply waits
+		// for it to finish (via doneCh below) before returning - no
+		// cancellation mid-pass, but no deadlock, panic, or race either.
+		p.runAndLog()
 		ticker := time.NewTicker(p.interval)
 		defer ticker.Stop()
 		for {
@@ -212,7 +223,7 @@ func (p *Pruner) PruneOnce() PruneStats {
 
 				if p.retentionDays > 0 && info.ModTime().Before(cutoff) {
 					size := info.Size()
-					if err := os.Remove(filePath); err != nil {
+					if err := p.removeFile(filePath); err != nil {
 						if !os.IsNotExist(err) {
 							stats.Errors++
 						}
@@ -244,7 +255,7 @@ func (p *Pruner) PruneOnce() PruneStats {
 				if _, isActive := active[filepath.Clean(f.path)]; isActive {
 					continue
 				}
-				if err := os.Remove(f.path); err != nil {
+				if err := p.removeFile(f.path); err != nil {
 					if !os.IsNotExist(err) {
 						stats.Errors++
 					}

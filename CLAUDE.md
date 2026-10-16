@@ -137,8 +137,10 @@ Sessions are tracked via `client_session_id` extracted from request bodies (e.g.
 
 ## Log Pruning (PRI-3457)
 
-`Pruner` (`pruner.go`) runs inside the same process as `Logger`, once at
-startup and then hourly, and deletes from `LLM_PROXY_LOG_DIR`:
+`Pruner` (`pruner.go`) runs inside the same process as `Logger`, entirely on
+a background goroutine - including the first pass, so a box with months of
+unpruned logs doesn't hold up startup health checks - once immediately and
+then hourly, and deletes from `LLM_PROXY_LOG_DIR`:
 
 - files older than `LLM_PROXY_LOG_RETENTION_DAYS` (default 14, mtime-based)
 - if the directory is still over `LLM_PROXY_LOG_MAX_BYTES` (default 5 GiB)

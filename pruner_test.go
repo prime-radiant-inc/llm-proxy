@@ -2,6 +2,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -318,23 +319,95 @@ func TestNewPruner_DefaultsIntervalWhenNonPositive(t *testing.T) {
 	}
 }
 
+// TestPruner_StartReturnsBeforeFirstPassCompletes is the regression test for
+// obra's review on PRI-3457: Start must hand control back to the caller
+// (NewServer, and through it /health) immediately, even on a box with months
+// of logs where the first pass is tens of thousands of deletes. It must not
+// block the caller until that first pass finishes.
+func TestPruner_StartReturnsBeforeFirstPassCompletes(t *testing.T) {
+	dir := t.TempDir()
+	const numFiles = 20
+	const perFileDelay = 30 * time.Millisecond
+	// Total first-pass time if run synchronously: ~600ms. Start must return
+	// in well under that.
+	for i := 0; i < numFiles; i++ {
+		writeDatedLogFile(t, dir, "api.anthropic.com", "2026-01-01", fmt.Sprintf("s%d", i), "x", 20*24*time.Hour)
+	}
+
+	p := NewPruner(dir, 14, 0, time.Hour, noActiveFiles)
+	realRemove := p.removeFile
+	p.removeFile = func(path string) error {
+		time.Sleep(perFileDelay)
+		return realRemove(path)
+	}
+
+	start := time.Now()
+	p.Start()
+	elapsed := time.Since(start)
+	defer p.Stop()
+
+	const budget = 150 * time.Millisecond
+	if elapsed > budget {
+		t.Fatalf("Start() took %v (budget %v) - the first prune pass is blocking the caller instead of running in the background", elapsed, budget)
+	}
+}
+
+// TestPruner_StopDuringFirstPassReturnsPromptly verifies that calling Stop
+// while the (now backgrounded) first pass is still running doesn't deadlock,
+// panic, or race - it must simply wait for that in-flight pass to finish and
+// return, cleanly, every time.
+func TestPruner_StopDuringFirstPassReturnsPromptly(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 5; i++ {
+		writeDatedLogFile(t, dir, "api.anthropic.com", "2026-01-01", fmt.Sprintf("s%d", i), "x", 20*24*time.Hour)
+	}
+
+	p := NewPruner(dir, 14, 0, time.Hour, noActiveFiles)
+	realRemove := p.removeFile
+	p.removeFile = func(path string) error {
+		time.Sleep(20 * time.Millisecond)
+		return realRemove(path)
+	}
+
+	p.Start()
+	// Stop immediately - the background first pass is almost certainly still
+	// running (5 files * 20ms = ~100ms of work).
+	done := make(chan struct{})
+	go func() {
+		p.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return - mid-first-pass shutdown deadlocked")
+	}
+
+	// Idempotent even after a mid-pass stop.
+	p.Stop()
+}
+
 func TestPruner_StartStop(t *testing.T) {
 	dir := t.TempDir()
 	oldPath := writeDatedLogFile(t, dir, "api.anthropic.com", "2026-01-01", "old-session", "x", 20*24*time.Hour)
 
 	p := NewPruner(dir, 14, 0, 10*time.Millisecond, noActiveFiles)
 
-	// Start's initial pass is synchronous precisely so there is no race for a
-	// caller to wait out: by the time Start returns, the old file is already gone.
+	// Start no longer blocks for the first pass (PRI-3457 review: it must
+	// run in the background, not hold up the caller). Stop waits for
+	// whatever pass is in flight to finish before returning, so it's the
+	// synchronization point to check the first pass's effects by.
 	p.Start()
-	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
-		t.Errorf("expected the startup pass to have already pruned the old file by the time Start returns, stat err = %v", err)
-	}
 
 	// Second Start must be a safe no-op, not a second goroutine/double-close panic.
 	p.Start()
 
 	p.Stop()
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Errorf("expected the startup pass to have pruned the old file by the time Stop returns, stat err = %v", err)
+	}
+
 	// Stop must be idempotent.
 	p.Stop()
 }

@@ -147,12 +147,18 @@ func TestNewServer_LokiInvalidURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Server creation should succeed with invalid Loki config: %v", err)
 	}
-	defer srv.Close()
 
 	// LokiExporter should be nil due to invalid URL
 	if srv.lokiExporter != nil {
 		t.Error("expected lokiExporter to be nil with invalid URL")
 	}
+
+	// Close before inspecting logBuf: Pruner's startup pass now logs from a
+	// background goroutine (PRI-3457 review), and Close waits for it to
+	// finish via Stop's doneCh. That wait is the synchronization point that
+	// makes reading logBuf below race-free - reading it beforehand would race
+	// with that goroutine's still-possibly-in-flight log.Printf.
+	srv.Close()
 
 	// Warning should be logged
 	logOutput := logBuf.String()
