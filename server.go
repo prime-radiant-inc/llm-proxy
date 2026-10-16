@@ -17,6 +17,7 @@ type Server struct {
 	lokiExporter   *LokiExporter
 	multiWriter    *MultiWriter
 	sessionManager *SessionManager
+	pruner         *Pruner
 }
 
 func NewServer(cfg Config) (*Server, error) {
@@ -73,6 +74,14 @@ func NewServer(cfg Config) (*Server, error) {
 		fileLogger.Close()
 		return nil, err
 	}
+
+	// PRI-3457: prune old/excess request logs so this box's data disk can't
+	// fill up the way Ada's did. Starts even if both limits are 0 (disabled)
+	// - PruneOnce is then a fast no-op every tick, which is simpler and safer
+	// than conditionally skipping the goroutine for what should be a rare
+	// opt-out.
+	pruner := NewPruner(cfg.LogDir, cfg.LogRetentionDays, cfg.LogMaxBytes, time.Hour, fileLogger.ActiveLogFiles)
+	pruner.Start()
 
 	// Get event emitter from multiWriter (returns nil if Loki not configured)
 	eventEmitter := multiWriter.EventEmitter()
@@ -137,6 +146,7 @@ func NewServer(cfg Config) (*Server, error) {
 		lokiExporter:   lokiExporter,
 		multiWriter:    multiWriter,
 		sessionManager: sessionManager,
+		pruner:         pruner,
 	}
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/health/loki", s.handleHealthLoki)
@@ -229,6 +239,10 @@ func (s *Server) handleHealthBedrock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Close() error {
+	if s.pruner != nil {
+		s.pruner.Stop()
+	}
+
 	var err error
 	if s.sessionManager != nil {
 		err = s.sessionManager.Close()

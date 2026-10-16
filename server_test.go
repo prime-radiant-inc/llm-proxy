@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -125,10 +126,13 @@ func TestNewServer_LokiEnabled(t *testing.T) {
 func TestNewServer_LokiInvalidURL(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Capture log output
+	// Capture log output. Restore the real default (os.Stderr), not nil -
+	// leaving the package-global logger's output nil breaks every log.Printf
+	// call in every test that runs afterward in this binary (PRI-3457 found
+	// this the hard way: Pruner's startup log call crashed the next test).
 	var logBuf bytes.Buffer
 	log.SetOutput(&logBuf)
-	defer log.SetOutput(nil)
+	defer log.SetOutput(os.Stderr)
 
 	cfg := Config{
 		Port:   12071,
@@ -341,6 +345,7 @@ func TestNewServerWiresTokenSubWhenEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer srv.Close()
 	if srv.proxy.tokenSub == nil {
 		t.Error("expected tokenSub to be wired when enabled")
 	}
@@ -353,6 +358,7 @@ func TestNewServerNoTokenSubWhenDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer srv.Close()
 	if srv.proxy.tokenSub != nil {
 		t.Error("tokenSub should be nil when disabled")
 	}
@@ -367,6 +373,7 @@ func TestNewServerWiresMantleRunIDRequirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer srv.Close()
 
 	if !srv.proxy.mantleRequireCloudBuildRunID {
 		t.Fatal("expected mantleRequireCloudBuildRunID to be wired to proxy")
@@ -382,6 +389,7 @@ func TestNewServerWiresAllowedUpstreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer srv.Close()
 
 	// The configured allowlist must actually populate the proxy so the SSRF gate
 	// enforces it in production rather than defaulting open.

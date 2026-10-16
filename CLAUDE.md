@@ -110,6 +110,8 @@ Sessions are tracked via `client_session_id` extracted from request bodies (e.g.
 |----------|-------------|
 | `LLM_PROXY_PORT` | Port to listen on |
 | `LLM_PROXY_LOG_DIR` | Log directory (default: `~/.llm-provider-logs/`) |
+| `LLM_PROXY_LOG_RETENTION_DAYS` | Delete request-log files older than this many days (default: `14`). `0` disables age-based pruning |
+| `LLM_PROXY_LOG_MAX_BYTES` | Total-size cap in bytes for `LLM_PROXY_LOG_DIR`; oldest files are deleted first once exceeded (default: `5368709120`, 5 GiB). `0` disables the size cap |
 | `ANTHROPIC_BASE_URL` | Set by `--env` to route Anthropic traffic through proxy |
 | `OPENAI_BASE_URL` | Set by `--env` to route OpenAI traffic through proxy |
 | `LLM_PROXY_LOKI_ENABLED` | Enable Loki export (`true` or `1`) |
@@ -132,3 +134,18 @@ Sessions are tracked via `client_session_id` extracted from request bodies (e.g.
 - Session DB: `~/.llm-provider-logs/sessions.db`
 - Portfile: `~/.local/state/llm-proxy/port`
 - Config: `~/.config/llm-proxy/config.toml` (optional)
+
+## Log Pruning (PRI-3457)
+
+`Pruner` (`pruner.go`) runs inside the same process as `Logger`, once at
+startup and then hourly, and deletes from `LLM_PROXY_LOG_DIR`:
+
+- files older than `LLM_PROXY_LOG_RETENTION_DAYS` (default 14, mtime-based)
+- if the directory is still over `LLM_PROXY_LOG_MAX_BYTES` (default 5 GiB)
+  after that, the oldest remaining files until it's back under the cap
+- date directories left empty by either pass
+
+It never deletes a session file the `Logger` currently has open for append
+(`Logger.ActiveLogFiles`), never touches `sessions.db` or anything else
+outside the `<upstream>/<date>/` structure, and a missing log dir or an
+unreadable file/directory is logged and skipped, never fatal.

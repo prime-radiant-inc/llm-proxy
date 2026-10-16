@@ -303,3 +303,48 @@ func TestRequestLogContextWritesLegacyRunMetadata(t *testing.T) {
 		t.Fatalf("resolved_run_id unexpectedly present in legacy context: %#v", meta)
 	}
 }
+
+// TestLogger_ActiveLogFiles verifies the pruner's one hard safety rail: it
+// must be able to ask the Logger which session files are currently open for
+// append, so it never deletes one out from under an in-flight request
+// (PRI-3457).
+func TestLogger_ActiveLogFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	// Before any session starts, nothing is active.
+	if active := logger.ActiveLogFiles(); len(active) != 0 {
+		t.Errorf("expected no active files before any session, got %v", active)
+	}
+
+	sessionID := "20260113-102345-active"
+	upstream := "api.anthropic.com"
+	if err := logger.LogSessionStart(sessionID, "anthropic", upstream); err != nil {
+		t.Fatalf("LogSessionStart: %v", err)
+	}
+
+	today := time.Now().Format("2006-01-02")
+	wantPath := filepath.Clean(filepath.Join(tmpDir, upstream, today, sessionID+".jsonl"))
+
+	active := logger.ActiveLogFiles()
+	if _, ok := active[wantPath]; !ok {
+		t.Errorf("ActiveLogFiles() = %v, want to contain %q", active, wantPath)
+	}
+	if len(active) != 1 {
+		t.Errorf("ActiveLogFiles() = %v, want exactly 1 entry", active)
+	}
+
+	// After Close, the logger holds no file handles and must not panic when
+	// asked again.
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if active := logger.ActiveLogFiles(); len(active) != 0 {
+		t.Errorf("expected no active files after Close, got %v", active)
+	}
+}
