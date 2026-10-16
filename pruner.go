@@ -95,10 +95,10 @@ func (p *Pruner) Start() {
 	go func() {
 		defer close(doneCh)
 		// First pass runs here too, on this goroutine, not on the caller's.
-		// If Stop is called while this is still running, Stop simply waits
-		// for it to finish (via doneCh below) before returning - no
-		// cancellation mid-pass, but no deadlock, panic, or race either.
-		p.runAndLog()
+		// It's cancellation-aware (see pruneOnce): if Stop is called while
+		// it's still running, it checks stopCh between file deletes and
+		// returns early, so Stop doesn't wait out the whole pass.
+		p.runAndLog(stopCh)
 		ticker := time.NewTicker(p.interval)
 		defer ticker.Stop()
 		for {
@@ -106,7 +106,7 @@ func (p *Pruner) Start() {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				p.runAndLog()
+				p.runAndLog(stopCh)
 			}
 		}
 	}()
@@ -128,15 +128,32 @@ func (p *Pruner) Stop() {
 	<-doneCh
 }
 
-func (p *Pruner) runAndLog() {
-	stats := p.PruneOnce()
-	// Counts and bytes only - never a path or a line of log content.
+func (p *Pruner) runAndLog(stop <-chan struct{}) {
+	stats := p.pruneOnce(stop)
+	// Counts and bytes only - never a path or a line of log content. A pass
+	// that stopped early (shutdown mid-pass) still logs here: its partial
+	// counts are accurate for the work it actually did, and a dedicated
+	// "stopped early" branch would add a second log shape for no real
+	// benefit - operators already see fewer files/bytes than a full pass as
+	// the signal that something cut it short.
 	log.Printf(
 		"llm-proxy log prune: age removed %d files (%d bytes), size-cap removed %d files (%d bytes), removed %d empty date dirs, %d errors",
 		stats.AgeFilesDeleted, stats.AgeBytesDeleted,
 		stats.SizeFilesDeleted, stats.SizeBytesDeleted,
 		stats.DirsRemoved, stats.Errors,
 	)
+}
+
+// stopRequested reports whether stop has been closed, without blocking.
+// A nil stop channel (PruneOnce's uncancellable entry point) never reports
+// true - a nil channel's receive case in a select is simply never ready.
+func stopRequested(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
 }
 
 // prunableFile is a candidate log file discovered under baseDir, kept around
@@ -147,7 +164,15 @@ type prunableFile struct {
 	modTime time.Time
 }
 
-// PruneOnce runs a single pass over baseDir: age-based deletion, then the
+// PruneOnce runs a single, uncancellable pass to completion. It's the
+// direct entry point for tests and any caller that wants one deterministic
+// full pass; the background loop in Start uses pruneOnce with a
+// cancellation channel instead, so Stop doesn't have to wait one out.
+func (p *Pruner) PruneOnce() PruneStats {
+	return p.pruneOnce(nil)
+}
+
+// pruneOnce runs a single pass over baseDir: age-based deletion, then the
 // total-size cap (oldest first), then empty-date-dir cleanup. It never
 // returns an error and never panics - a missing log dir, an unreadable
 // directory, or a permission error on an individual file is counted in
@@ -157,7 +182,12 @@ type prunableFile struct {
 // Only files inside the <baseDir>/<upstream>/<date>/ structure are ever
 // considered. Anything else directly under baseDir - sessions.db today,
 // whatever else tomorrow - is never touched, no matter its age.
-func (p *Pruner) PruneOnce() PruneStats {
+//
+// stop, if non-nil, is checked between file deletes and between phases
+// (age, size-cap, empty-dir sweep). Once closed, the pass returns
+// immediately with whatever partial stats it has accumulated so far -
+// never mid-delete, never leaving a file half-removed or double-counted.
+func (p *Pruner) pruneOnce(stop <-chan struct{}) PruneStats {
 	var stats PruneStats
 	active := p.activeFiles()
 
@@ -204,6 +234,9 @@ func (p *Pruner) PruneOnce() PruneStats {
 			}
 
 			for _, ent := range entries {
+				if stopRequested(stop) {
+					return stats
+				}
 				if ent.IsDir() {
 					continue // unexpected; don't recurse or delete it
 				}
@@ -239,6 +272,13 @@ func (p *Pruner) PruneOnce() PruneStats {
 		}
 	}
 
+	// Phase boundary: a big age phase can run out the clock on its own: check
+	// once here, before starting the (potentially also large) size-cap scan,
+	// rather than only between individual deletes within each phase.
+	if stopRequested(stop) {
+		return stats
+	}
+
 	if p.maxBytes > 0 {
 		var total int64
 		for _, f := range remaining {
@@ -249,6 +289,9 @@ func (p *Pruner) PruneOnce() PruneStats {
 				return remaining[i].modTime.Before(remaining[j].modTime)
 			})
 			for _, f := range remaining {
+				if stopRequested(stop) {
+					return stats
+				}
 				if total <= p.maxBytes {
 					break
 				}
@@ -266,6 +309,13 @@ func (p *Pruner) PruneOnce() PruneStats {
 				total -= f.size
 			}
 		}
+	}
+
+	// Phase boundary: don't start the directory-cleanup sweep either if
+	// shutdown is already in progress - it's cheap, but there's no reason to
+	// do even cheap work after cancellation.
+	if stopRequested(stop) {
+		return stats
 	}
 
 	// Final sweep: any date dir left with nothing in it (by either pass

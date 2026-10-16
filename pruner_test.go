@@ -352,39 +352,97 @@ func TestPruner_StartReturnsBeforeFirstPassCompletes(t *testing.T) {
 	}
 }
 
-// TestPruner_StopDuringFirstPassReturnsPromptly verifies that calling Stop
-// while the (now backgrounded) first pass is still running doesn't deadlock,
-// panic, or race - it must simply wait for that in-flight pass to finish and
-// return, cleanly, every time.
+// TestPruner_StopDuringFirstPassReturnsPromptly is the regression test for
+// obra's follow-up on PRI-3457: Stop must return in a small fraction of a
+// big first pass's total time, not wait for the whole thing to finish. The
+// pass must check for cancellation between file deletes (not just wait it
+// out), so Stop returns promptly even mid-way through.
 func TestPruner_StopDuringFirstPassReturnsPromptly(t *testing.T) {
 	dir := t.TempDir()
-	for i := 0; i < 5; i++ {
+	const numFiles = 200
+	const perFileDelay = 20 * time.Millisecond
+	// Full pass, uninterrupted: ~4s. Stop must return in a small fraction of
+	// that.
+	for i := 0; i < numFiles; i++ {
 		writeDatedLogFile(t, dir, "api.anthropic.com", "2026-01-01", fmt.Sprintf("s%d", i), "x", 20*24*time.Hour)
 	}
 
 	p := NewPruner(dir, 14, 0, time.Hour, noActiveFiles)
 	realRemove := p.removeFile
 	p.removeFile = func(path string) error {
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(perFileDelay)
 		return realRemove(path)
 	}
 
 	p.Start()
-	// Stop immediately - the background first pass is almost certainly still
-	// running (5 files * 20ms = ~100ms of work).
+	// Let the background first pass get well underway - a handful of files
+	// in, nowhere near done - before asking it to stop.
+	time.Sleep(10 * perFileDelay)
+
+	stopStart := time.Now()
 	done := make(chan struct{})
 	go func() {
 		p.Stop()
 		close(done)
 	}()
 
+	const budget = 500 * time.Millisecond // a small fraction of the ~4s full pass
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Stop() did not return - mid-first-pass shutdown deadlocked")
+		if elapsed := time.Since(stopStart); elapsed > budget {
+			t.Fatalf("Stop() took %v (budget %v) - the pass is waiting itself out instead of checking for cancellation between deletes", elapsed, budget)
+		}
+	case <-time.After(budget):
+		t.Fatalf("Stop() did not return within %v - the pass is waiting itself out instead of checking for cancellation between deletes", budget)
 	}
 
 	// Idempotent even after a mid-pass stop.
+	p.Stop()
+}
+
+// TestPruner_StopDuringSizeCapPhaseReturnsPromptly is the size-cap-phase
+// counterpart: retention is disabled so every file survives the age phase
+// and lands in the size-cap deletion loop, which must check for
+// cancellation between its deletes too.
+func TestPruner_StopDuringSizeCapPhaseReturnsPromptly(t *testing.T) {
+	dir := t.TempDir()
+	const numFiles = 200
+	const perFileDelay = 20 * time.Millisecond
+	content := make([]byte, 100)
+	for i := 0; i < numFiles; i++ {
+		writeDatedLogFile(t, dir, "api.anthropic.com", "2026-01-01", fmt.Sprintf("s%d", i), string(content), time.Duration(numFiles-i)*time.Second)
+	}
+
+	// Retention disabled (0): every file survives the age phase and is a
+	// size-cap candidate. Cap set near zero so all but a couple must be
+	// evicted, oldest first.
+	p := NewPruner(dir, 0, 200, time.Hour, noActiveFiles)
+	realRemove := p.removeFile
+	p.removeFile = func(path string) error {
+		time.Sleep(perFileDelay)
+		return realRemove(path)
+	}
+
+	p.Start()
+	time.Sleep(10 * perFileDelay)
+
+	stopStart := time.Now()
+	done := make(chan struct{})
+	go func() {
+		p.Stop()
+		close(done)
+	}()
+
+	const budget = 500 * time.Millisecond
+	select {
+	case <-done:
+		if elapsed := time.Since(stopStart); elapsed > budget {
+			t.Fatalf("Stop() took %v (budget %v) during the size-cap phase - it is waiting itself out instead of checking for cancellation between deletes", elapsed, budget)
+		}
+	case <-time.After(budget):
+		t.Fatalf("Stop() did not return within %v during the size-cap phase", budget)
+	}
+
 	p.Stop()
 }
 
@@ -395,17 +453,23 @@ func TestPruner_StartStop(t *testing.T) {
 	p := NewPruner(dir, 14, 0, 10*time.Millisecond, noActiveFiles)
 
 	// Start no longer blocks for the first pass (PRI-3457 review: it must
-	// run in the background, not hold up the caller). Stop waits for
-	// whatever pass is in flight to finish before returning, so it's the
-	// synchronization point to check the first pass's effects by.
+	// run in the background, not hold up the caller). With cancellation now
+	// checked between every file (PRI-3457 follow-up review), Stop can
+	// legitimately return before the first pass has done ANY work at all -
+	// that's the whole point. So this test doesn't race Stop against Start:
+	// it gives the uninterrupted first pass a moment to actually run, then
+	// confirms both Start and Stop are idempotent and nothing panics or
+	// hangs either way.
 	p.Start()
 
 	// Second Start must be a safe no-op, not a second goroutine/double-close panic.
 	p.Start()
 
+	time.Sleep(50 * time.Millisecond) // let the (uninterrupted, instant-delete) first pass finish
+
 	p.Stop()
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
-		t.Errorf("expected the startup pass to have pruned the old file by the time Stop returns, stat err = %v", err)
+		t.Errorf("expected the uninterrupted first pass to have pruned the old file before Stop was called, stat err = %v", err)
 	}
 
 	// Stop must be idempotent.
