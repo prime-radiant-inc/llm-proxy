@@ -25,6 +25,7 @@ type StreamChunk struct {
 }
 
 type RequestLogContext struct {
+	Correlation   ModelCallCorrelation
 	Transport     string
 	ModelOverride string
 	RunID         string
@@ -178,6 +179,9 @@ func (l *Logger) addRequestLogContext(meta map[string]interface{}, requestID str
 }
 
 func addRequestLogContextMeta(meta map[string]interface{}, ctx RequestLogContext) {
+	addMetaString(meta, "lace_session_id", ctx.Correlation.SessionID)
+	addMetaString(meta, "lace_turn_id", ctx.Correlation.TurnID)
+	addMetaString(meta, "model_call_id", ctx.Correlation.ModelCallID)
 	addMetaString(meta, "transport", ctx.Transport)
 	addMetaString(meta, "model_override", ctx.ModelOverride)
 	addMetaString(meta, "run_id", ctx.RunID)
