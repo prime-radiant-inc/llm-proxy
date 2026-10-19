@@ -425,6 +425,7 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 
 	// Copy headers
 	copyHeaders(proxyReq.Header, r.Header)
+	stripModelCallCorrelation(proxyReq.Header)
 
 	// Set host header
 	proxyReq.Host = upstream
@@ -469,16 +470,19 @@ func (p *Proxy) serveGenericProxyForPath(w http.ResponseWriter, r *http.Request,
 		// Generate unique request ID for this API call
 		requestID = uuid.New().String()
 
-		if attribution.RunID != "" {
+		correlation := extractModelCallCorrelation(r.Header)
+		if attribution.RunID != "" || correlation != (ModelCallCorrelation{}) {
 			if logger, ok := p.logger.(requestLogContextLogger); ok {
-				logger.SetRequestLogContext(requestID, RequestLogContext{
-					RunID:         attribution.RunID,
-					ResolvedRunID: resolved.RunID,
-					ClientFPHash:  resolved.ClientFPHash,
-					Project:       resolved.Project,
-					ProviderRoute: provider,
-					WireAPI:       genericWireAPI(path),
-				})
+				ctx := RequestLogContext{Correlation: correlation}
+				if attribution.RunID != "" {
+					ctx.RunID = attribution.RunID
+					ctx.ResolvedRunID = resolved.RunID
+					ctx.ClientFPHash = resolved.ClientFPHash
+					ctx.Project = resolved.Project
+					ctx.ProviderRoute = provider
+					ctx.WireAPI = genericWireAPI(path)
+				}
+				logger.SetRequestLogContext(requestID, ctx)
 				defer logger.ClearRequestLogContext(requestID)
 			}
 		}

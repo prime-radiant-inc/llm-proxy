@@ -49,6 +49,29 @@ LLM Proxy sits between your LLM clients (Claude Code, Codex, API scripts) and th
 
 Each session is a JSONL file with request/response pairs, timing information, and metadata.
 
+### Runtime correlation
+
+For existing captures on `/{provider}/{upstream}/...` routes, clients may send
+`X-Lace-Session-Id`, `X-Lace-Turn-Id` and `X-Lace-Model-Call-Id`. Valid values
+appear on both request and response records as `_meta.lace_session_id`,
+`_meta.lace_turn_id` and `_meta.model_call_id`. Each value must be 1–128 printable
+ASCII bytes without whitespace or control characters; invalid individual
+values are omitted without rejecting the request.
+
+These are diagnostic identifiers. They do not select proxy sessions, authorize
+requests, alter prompts or control retries. The existing `_meta.session`,
+per-attempt `_meta.request_id` and run attribution keep their meanings. A client
+can reuse one logical model-call ID across attempts, each with a distinct proxy
+request ID. Internal correlation headers are removed from the outgoing request
+before forwarding or Claude Platform signing, including invalid values.
+
+Coverage follows the existing capture decision, including streaming, upstream
+errors and Platform signing failures. Missing captures remain possible when
+logging fails; metadata does not make logging a prerequisite for forwarding.
+Direct Bedrock/Mantle routes retain their existing header allowlists and do not
+add these capture fields. This supplies join fields, not a complete trace or a
+new storage/retention mechanism.
+
 ## Remote Push (Loki Export)
 
 Optionally export logs in real-time to [Grafana Loki](https://grafana.com/oss/loki/) for centralized observability. Useful for aggregating logs across ephemeral containers or multiple machines.

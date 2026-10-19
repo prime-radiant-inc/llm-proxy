@@ -540,6 +540,7 @@ func TestServeHTTP_PlatformAWS_SignedRoundTrip(t *testing.T) {
 	body := `{"model":"claude-haiku-4-5","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest("POST", "/anthropic/api.anthropic.com/v1/messages", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	setCorrelationTestHeaders(req, "signed")
 	req.Header.Set("X-Api-Key", "sk-should-be-dropped")
 	req.Header.Set("Anthropic-Workspace-Id", "wrkspc_client_override")
 	req.Header.Set("Anthropic-Version", "2023-06-01")
@@ -555,6 +556,11 @@ func TestServeHTTP_PlatformAWS_SignedRoundTrip(t *testing.T) {
 		t.Errorf("upstream path = %q, want /v1/messages", capturedPath)
 	}
 	auth := captured.Get("Authorization")
+	for _, name := range correlationTestHeaders {
+		if captured.Get(name) != "" || strings.Contains(strings.ToLower(auth), strings.ToLower(name)) {
+			t.Errorf("internal correlation was forwarded or signed: %s", name)
+		}
+	}
 	if !strings.Contains(auth, "AWS4-HMAC-SHA256") {
 		t.Errorf("Authorization = %q, want AWS4-HMAC-SHA256", auth)
 	}
