@@ -425,13 +425,16 @@ func TestLoadConfigFromTOML_AllowedUpstreamsAbsentIsEmpty(t *testing.T) {
 // --- PRI-3457: log retention / size-cap pruning config -------------------
 
 func TestDefaultConfig_LogPruning(t *testing.T) {
+	// Jesse's call: pruning defaults to fully OFF in the bare binary. It
+	// only matters for a long-lived sidecar against a persistent data disk
+	// (colleague boxes), which sen-core's docker-compose enables explicitly
+	// (14 days / 5 GiB) via LLM_PROXY_LOG_RETENTION_DAYS/LLM_PROXY_LOG_MAX_BYTES.
 	cfg := DefaultConfig()
-	if cfg.LogRetentionDays != 14 {
-		t.Errorf("expected default LogRetentionDays 14, got %d", cfg.LogRetentionDays)
+	if cfg.LogRetentionDays != 0 {
+		t.Errorf("expected default LogRetentionDays 0 (disabled), got %d", cfg.LogRetentionDays)
 	}
-	const wantBytes = 5 * 1024 * 1024 * 1024
-	if cfg.LogMaxBytes != wantBytes {
-		t.Errorf("expected default LogMaxBytes %d (5 GiB), got %d", wantBytes, cfg.LogMaxBytes)
+	if cfg.LogMaxBytes != 0 {
+		t.Errorf("expected default LogMaxBytes 0 (disabled), got %d", cfg.LogMaxBytes)
 	}
 }
 
@@ -481,12 +484,13 @@ func TestLoadConfigFromEnv_LogPruningInvalidValuesIgnored(t *testing.T) {
 
 	cfg := LoadConfigFromEnv(DefaultConfig())
 
-	if cfg.LogRetentionDays != 14 {
-		t.Errorf("invalid LLM_PROXY_LOG_RETENTION_DAYS should keep default, got %d", cfg.LogRetentionDays)
+	// Default is 0/0 (disabled); an invalid env value must keep that, not
+	// coerce to some other value.
+	if cfg.LogRetentionDays != 0 {
+		t.Errorf("invalid LLM_PROXY_LOG_RETENTION_DAYS should keep default 0, got %d", cfg.LogRetentionDays)
 	}
-	const wantBytes = 5 * 1024 * 1024 * 1024
-	if cfg.LogMaxBytes != wantBytes {
-		t.Errorf("invalid LLM_PROXY_LOG_MAX_BYTES should keep default, got %d", cfg.LogMaxBytes)
+	if cfg.LogMaxBytes != 0 {
+		t.Errorf("invalid LLM_PROXY_LOG_MAX_BYTES should keep default 0, got %d", cfg.LogMaxBytes)
 	}
 }
 

@@ -75,11 +75,12 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 
-	// PRI-3457: prune old/excess request logs so this box's data disk can't
-	// fill up the way Ada's did. Starts even if both limits are 0 (disabled)
-	// - PruneOnce is then a fast no-op every tick, which is simpler and safer
-	// than conditionally skipping the goroutine for what should be a rare
-	// opt-out.
+	// PRI-3457: prune old/excess request logs so a box running this as a
+	// long-lived sidecar can't fill its data disk the way Ada's did.
+	// Defaults to disabled (0/0) in this binary - Jesse's call; sen-core's
+	// docker-compose turns it on for colleague boxes. Start itself checks
+	// both limits and is a complete no-op (no goroutine, no pass, ever)
+	// when they're 0/0, logging that pruning is disabled instead.
 	pruner := NewPruner(cfg.LogDir, cfg.LogRetentionDays, cfg.LogMaxBytes, time.Hour, fileLogger.ActiveLogFiles)
 	pruner.Start()
 

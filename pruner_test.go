@@ -2,9 +2,12 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -474,4 +477,112 @@ func TestPruner_StartStop(t *testing.T) {
 
 	// Stop must be idempotent.
 	p.Stop()
+}
+
+// --- Jesse's decision: pruning defaults OFF (0/0) in the bare binary -----
+
+// TestPruner_DisabledWhenBothLimitsZero verifies that 0/0 really means
+// disabled: no goroutine is ever launched, no file is ever walked or
+// deleted, and the startup log line says pruning is disabled rather than
+// reporting a (trivially empty) pass summary.
+func TestPruner_DisabledWhenBothLimitsZero(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := writeDatedLogFile(t, dir, "api.anthropic.com", "2026-01-01", "old-session", "x", 365*24*time.Hour)
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	p := NewPruner(dir, 0, 0, time.Hour, noActiveFiles)
+	p.Start()
+
+	// No goroutine should have been launched at all - Start must detect
+	// 0/0 and return without ever creating stopCh/doneCh.
+	if p.stopCh != nil || p.doneCh != nil {
+		t.Error("Start launched a goroutine (stopCh/doneCh set) despite both limits being 0")
+	}
+
+	// Stop must be a safe no-op here - no close-of-nil-channel panic, no hang.
+	done := make(chan struct{})
+	go func() {
+		p.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Stop() hung when pruning was disabled")
+	}
+	// Idempotent, same as the enabled path.
+	p.Stop()
+
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Errorf("disabled pruning deleted (or otherwise touched) a file it should never have walked: %v", err)
+	}
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "disabled") {
+		t.Errorf("expected startup log to say pruning is disabled, got: %q", logOutput)
+	}
+	if strings.Contains(logOutput, "age removed") || strings.Contains(logOutput, "size-cap removed") {
+		t.Errorf("disabled pruning logged a pass-summary line (implies a pass ran) instead of just the disabled message: %q", logOutput)
+	}
+}
+
+// TestPruner_RetentionOnlyStillRuns verifies that setting only
+// LogRetentionDays (size cap left at 0) still enables age-based pruning -
+// 0/0 is the only combination that disables everything.
+func TestPruner_RetentionOnlyStillRuns(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := writeDatedLogFile(t, dir, "api.anthropic.com", "2026-01-01", "old-session", "x", 20*24*time.Hour)
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	p := NewPruner(dir, 14, 0, time.Hour, noActiveFiles)
+	p.Start()
+	if p.stopCh == nil {
+		t.Fatal("Start treated retention-only (size cap 0) as fully disabled")
+	}
+	time.Sleep(50 * time.Millisecond) // let the uninterrupted (instant-delete) first pass finish
+	p.Stop()
+
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Errorf("expected age pruning alone to remove the old file, stat err = %v", err)
+	}
+	if strings.Contains(logBuf.String(), "disabled") {
+		t.Errorf("logged disabled despite retention being enabled: %q", logBuf.String())
+	}
+}
+
+// TestPruner_SizeCapOnlyStillRuns verifies that setting only LogMaxBytes
+// (retention left at 0) still enables size-cap pruning.
+func TestPruner_SizeCapOnlyStillRuns(t *testing.T) {
+	dir := t.TempDir()
+	content := make([]byte, 100)
+	oldest := writeDatedLogFile(t, dir, "api.anthropic.com", "2026-01-01", "s1", string(content), 3*time.Hour)
+	newest := writeDatedLogFile(t, dir, "api.anthropic.com", "2026-01-02", "s2", string(content), 1*time.Hour)
+
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+
+	p := NewPruner(dir, 0, 150, time.Hour, noActiveFiles)
+	p.Start()
+	if p.stopCh == nil {
+		t.Fatal("Start treated size-cap-only (retention 0) as fully disabled")
+	}
+	time.Sleep(50 * time.Millisecond) // let the uninterrupted (instant-delete) first pass finish
+	p.Stop()
+
+	if _, err := os.Stat(oldest); !os.IsNotExist(err) {
+		t.Errorf("expected size-cap pruning alone to remove the oldest file, stat err = %v", err)
+	}
+	if _, err := os.Stat(newest); err != nil {
+		t.Errorf("expected the newest file to survive, stat err = %v", err)
+	}
+	if strings.Contains(logBuf.String(), "disabled") {
+		t.Errorf("logged disabled despite size cap being enabled: %q", logBuf.String())
+	}
 }

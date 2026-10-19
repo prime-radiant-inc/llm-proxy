@@ -78,8 +78,17 @@ func NewPruner(baseDir string, retentionDays int, maxBytes int64, interval time.
 // unpruned logs: a first pass there can be tens of thousands of deletes,
 // and NewServer calls Start while constructing the Server that answers
 // /health - a synchronous first pass there would hold up startup health
-// checks for however long that pass takes (PRI-3457 review). A second call
-// to Start is a no-op (idempotent).
+// checks for however long that pass takes (PRI-3457 review).
+//
+// If both retentionDays and maxBytes are <= 0, pruning is fully disabled
+// (Jesse's call: off by default in the bare binary; sen-core's
+// docker-compose turns it on - 14 days / 5 GiB - for colleague boxes).
+// Disabled means disabled: no goroutine is started, no pass ever runs, no
+// file is ever walked or deleted. Start logs that pruning is disabled once
+// and returns.
+//
+// A second call to Start is a no-op (idempotent), whether pruning ended up
+// enabled or disabled.
 func (p *Pruner) Start() {
 	p.mu.Lock()
 	if p.started {
@@ -87,6 +96,13 @@ func (p *Pruner) Start() {
 		return
 	}
 	p.started = true
+
+	if p.retentionDays <= 0 && p.maxBytes <= 0 {
+		p.mu.Unlock()
+		log.Printf("llm-proxy log prune: disabled (log_retention_days and log_max_bytes are both 0)")
+		return
+	}
+
 	p.stopCh = make(chan struct{})
 	p.doneCh = make(chan struct{})
 	stopCh, doneCh := p.stopCh, p.doneCh
@@ -113,7 +129,8 @@ func (p *Pruner) Start() {
 }
 
 // Stop signals the background loop to exit and waits for it to finish.
-// Idempotent; safe to call even if Start was never called.
+// Idempotent; safe to call even if Start was never called, or if Start ran
+// but pruning was disabled (no goroutine to stop, so nothing to wait for).
 func (p *Pruner) Stop() {
 	p.mu.Lock()
 	if !p.started {
@@ -124,6 +141,10 @@ func (p *Pruner) Stop() {
 	p.started = false
 	p.mu.Unlock()
 
+	if stopCh == nil {
+		// Start found pruning disabled and never launched a goroutine.
+		return
+	}
 	close(stopCh)
 	<-doneCh
 }

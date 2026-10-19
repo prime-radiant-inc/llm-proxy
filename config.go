@@ -78,7 +78,8 @@ type Config struct {
 	// host values; the source names no specific upstream.
 	AllowedUpstreams map[string][]string `toml:"allowed_upstreams"`
 	// PRI-3457: request-log pruning. LogRetentionDays <= 0 disables age-based
-	// pruning; LogMaxBytes <= 0 disables the total-size cap. Both apply to
+	// pruning; LogMaxBytes <= 0 disables the total-size cap. Default is 0/0
+	// (fully disabled) in this binary; see DefaultConfig. Both apply to
 	// everything under LogDir (the <upstream>/<date>/<session>.jsonl tree),
 	// never to sessions.db or any other top-level file.
 	LogRetentionDays int   `toml:"log_retention_days"`
@@ -104,12 +105,17 @@ func DefaultConfig() Config {
 			CacheSize:   10000,
 			TimeoutStr:  "2s",
 		},
-		// PRI-3457: unbounded request-log growth filled a coworker's data
-		// disk and stopped it for 6 days. 14 days / 5 GiB keeps enough
-		// history for same-day debugging (sen-core's doctor check only
-		// looks back 24h) without growing without bound.
-		LogRetentionDays: 14,
-		LogMaxBytes:      5 * 1024 * 1024 * 1024,
+		// PRI-3457: request-log pruning defaults to OFF (0/0) in the bare
+		// binary. Unbounded growth filled a coworker's data disk and
+		// stopped it for 6 days, but that risk is specific to colleague
+		// boxes running this as a long-lived sidecar against a persistent
+		// data disk - not every llm-proxy install. Jesse's call: sen-core's
+		// docker-compose sets LLM_PROXY_LOG_RETENTION_DAYS=14 and
+		// LLM_PROXY_LOG_MAX_BYTES=5368709120 (5 GiB) for colleague boxes;
+		// the binary itself stays conservative and deletes nothing unless
+		// told to.
+		LogRetentionDays: 0,
+		LogMaxBytes:      0,
 	}
 }
 
