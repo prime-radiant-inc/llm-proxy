@@ -359,12 +359,16 @@ func countOpenFDsUnder(t *testing.T, dir string) int {
 	return count
 }
 
-// TestLogger_IdleSessionFilesAccumulateForever shows the leak directly:
-// N sessions each open their own file, and once the Logger's clock is
-// advanced well past any reasonable idle window, nothing closes any of
-// them - because, on unfixed code, there is no idle-close path at all,
-// only Close (full shutdown).
-func TestLogger_IdleSessionFilesAccumulateForever(t *testing.T) {
+// TestLogger_Baseline_SettingNowAloneDoesNotCloseFiles is a baseline
+// characterization test, not a regression test for the fix: it documents
+// that closing is driven only by an explicit sweep (CloseIdleFiles,
+// called directly or by the Start goroutine), never by merely overriding
+// l.now. It passes before, during, and after the fix - including with
+// CloseIdleFiles mutated to a no-op - because nothing in it ever triggers
+// a sweep. See TestLogger_CloseIdleFiles_ClosesStaleSessions and
+// TestLogger_StartStop_Idempotent for the tests that actually exercise
+// (and fail without) the fix.
+func TestLogger_Baseline_SettingNowAloneDoesNotCloseFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	logger, err := NewLogger(tmpDir)
 	if err != nil {
@@ -387,15 +391,16 @@ func TestLogger_IdleSessionFilesAccumulateForever(t *testing.T) {
 		t.Fatalf("open fds under %s = %d, want at least %d", tmpDir, fdBefore, n)
 	}
 
-	// None of these sessions will ever write again. Advance the fake
-	// clock two hours - any idle-close path should have acted by now.
+	// Advance the fake clock two hours. By itself this changes nothing:
+	// no sweep has run, so nothing is closed - closing only ever happens
+	// inside CloseIdleFiles.
 	logger.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 
 	logger.mu.Lock()
 	openAfter := len(logger.files)
 	logger.mu.Unlock()
 	if openAfter != n {
-		t.Fatalf("open files after advancing the clock = %d, want still %d (no idle-close path exists)", openAfter, n)
+		t.Fatalf("open files after advancing the clock with no sweep = %d, want still %d", openAfter, n)
 	}
 
 	fdAfter := countOpenFDsUnder(t, tmpDir)
