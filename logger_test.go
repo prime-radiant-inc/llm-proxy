@@ -3,10 +3,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -302,4 +304,398 @@ func TestRequestLogContextWritesLegacyRunMetadata(t *testing.T) {
 	if _, ok := meta["resolved_run_id"]; ok {
 		t.Fatalf("resolved_run_id unexpectedly present in legacy context: %#v", meta)
 	}
+}
+
+// --- File-handle leak regression tests ---
+//
+// The Logger never closed a session's log file until the whole process
+// shut down (Close). Every session that ever wrote a line stayed in
+// l.files, and its *os.File, for the life of the process - an unbounded
+// leak that also meant a file deleted out from under it (manual cleanup,
+// or the pruner in PRI-3457) never actually freed disk space, because the
+// kernel won't reclaim a deleted file's blocks while any process still
+// holds it open. These tests open sessions, fake the idle clock forward,
+// and assert the Logger actually lets them go.
+
+// openNSessions registers and writes one entry for n fresh sessions, each
+// under its own upstream so they land in distinct dirs, and returns their
+// IDs.
+func openNSessions(t *testing.T, logger *Logger, n int) []string {
+	t.Helper()
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		sessionID := fmt.Sprintf("20260113-102345-sess%04d", i)
+		upstream := fmt.Sprintf("upstream-%d.example.com", i)
+		if err := logger.LogSessionStart(sessionID, "anthropic", upstream); err != nil {
+			t.Fatalf("LogSessionStart(%s): %v", sessionID, err)
+		}
+		ids[i] = sessionID
+	}
+	return ids
+}
+
+// countOpenFDsUnder returns how many of this process's open file
+// descriptors currently point somewhere under dir, by walking
+// /proc/self/fd. Skips (rather than fails) on a kernel without /proc, so
+// this stays portable to non-Linux CI while still being meaningful where
+// it matters (PRI-3457's reported host is Linux).
+func countOpenFDsUnder(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("cannot read /proc/self/fd (non-Linux?): %v", err)
+	}
+	dir = filepath.Clean(dir)
+	count := 0
+	for _, e := range entries {
+		link, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(link, dir) {
+			count++
+		}
+	}
+	return count
+}
+
+// TestLogger_Baseline_SettingNowAloneDoesNotCloseFiles is a baseline
+// characterization test, not a regression test for the fix: it documents
+// that closing is driven only by an explicit sweep (CloseIdleFiles,
+// called directly or by the Start goroutine), never by merely overriding
+// l.now. It passes before, during, and after the fix - including with
+// CloseIdleFiles mutated to a no-op - because nothing in it ever triggers
+// a sweep. See TestLogger_CloseIdleFiles_ClosesStaleSessions and
+// TestLogger_StartStop_Idempotent for the tests that actually exercise
+// (and fail without) the fix.
+func TestLogger_Baseline_SettingNowAloneDoesNotCloseFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	const n = 50
+	openNSessions(t, logger, n)
+
+	logger.mu.Lock()
+	openBefore := len(logger.files)
+	logger.mu.Unlock()
+	if openBefore != n {
+		t.Fatalf("open files after writing %d sessions = %d, want %d", n, openBefore, n)
+	}
+
+	fdBefore := countOpenFDsUnder(t, tmpDir)
+	if fdBefore < n {
+		t.Fatalf("open fds under %s = %d, want at least %d", tmpDir, fdBefore, n)
+	}
+
+	// Advance the fake clock two hours. By itself this changes nothing:
+	// no sweep has run, so nothing is closed - closing only ever happens
+	// inside CloseIdleFiles.
+	logger.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+
+	logger.mu.Lock()
+	openAfter := len(logger.files)
+	logger.mu.Unlock()
+	if openAfter != n {
+		t.Fatalf("open files after advancing the clock with no sweep = %d, want still %d", openAfter, n)
+	}
+
+	fdAfter := countOpenFDsUnder(t, tmpDir)
+	if fdAfter != fdBefore {
+		t.Fatalf("open fds under %s after advancing the clock = %d, want still %d", tmpDir, fdAfter, fdBefore)
+	}
+}
+
+// TestLogger_CloseIdleFiles_ClosesStaleSessions is the fix's core
+// contract: open N sessions, advance the fake clock past idleTimeout, and
+// assert CloseIdleFiles actually closes every one of them - both in the
+// logger's own bookkeeping (l.files) and as real, OS-visible file
+// descriptors.
+func TestLogger_CloseIdleFiles_ClosesStaleSessions(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	const n = 50
+	openNSessions(t, logger, n)
+
+	fdBefore := countOpenFDsUnder(t, tmpDir)
+	if fdBefore < n {
+		t.Fatalf("open fds under %s = %d, want at least %d", tmpDir, fdBefore, n)
+	}
+
+	base := time.Now()
+	logger.now = func() time.Time { return base.Add(logger.idleTimeout + time.Minute) }
+
+	closed := logger.CloseIdleFiles()
+	if closed != n {
+		t.Fatalf("CloseIdleFiles() = %d, want %d", closed, n)
+	}
+
+	logger.mu.Lock()
+	openAfter := len(logger.files)
+	logger.mu.Unlock()
+	if openAfter != 0 {
+		t.Fatalf("open files after CloseIdleFiles = %d, want 0", openAfter)
+	}
+
+	fdAfter := countOpenFDsUnder(t, tmpDir)
+	if fdAfter != 0 {
+		t.Fatalf("open fds under %s after CloseIdleFiles = %d, want 0", tmpDir, fdAfter)
+	}
+}
+
+// TestLogger_CloseIdleFiles_KeepsRecentSessionsOpen is the companion
+// negative case: a session that wrote within idleTimeout must not be
+// closed out from under an in-flight conversation.
+func TestLogger_CloseIdleFiles_KeepsRecentSessionsOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	openNSessions(t, logger, 3)
+
+	base := time.Now()
+	logger.now = func() time.Time { return base.Add(logger.idleTimeout / 2) }
+
+	if closed := logger.CloseIdleFiles(); closed != 0 {
+		t.Fatalf("CloseIdleFiles() = %d, want 0 (nothing is idle yet)", closed)
+	}
+
+	logger.mu.Lock()
+	open := len(logger.files)
+	logger.mu.Unlock()
+	if open != 3 {
+		t.Fatalf("open files = %d, want 3 (none should have been closed)", open)
+	}
+}
+
+// TestLogger_CloseIdleFiles_ClosesOnDateRollover covers the other half of
+// the fix: a session that stays open across midnight must have its
+// yesterday-dated file closed, and the next write for that session must
+// land in a freshly opened file under today's date dir - not keep
+// appending to yesterday's.
+func TestLogger_CloseIdleFiles_ClosesOnDateRollover(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	day1 := time.Date(2026, 1, 13, 23, 55, 0, 0, time.UTC)
+	logger.now = func() time.Time { return day1 }
+
+	sessionID := "20260113-235500-rollover"
+	upstream := "api.anthropic.com"
+	if err := logger.LogSessionStart(sessionID, "anthropic", upstream); err != nil {
+		t.Fatalf("LogSessionStart: %v", err)
+	}
+
+	day1Path := filepath.Join(tmpDir, upstream, "2026-01-13", sessionID+".jsonl")
+	if _, err := os.Stat(day1Path); err != nil {
+		t.Fatalf("expected day-1 file at %s: %v", day1Path, err)
+	}
+
+	// Roll the clock past midnight, within idleTimeout of the last write,
+	// then sweep. A plain idle check alone would NOT close this file; the
+	// rollover check must.
+	day2 := day1.Add(10 * time.Minute) // 23:55 -> 00:05 next day
+	logger.now = func() time.Time { return day2 }
+
+	closed := logger.CloseIdleFiles()
+	if closed != 1 {
+		t.Fatalf("CloseIdleFiles() across date rollover = %d, want 1", closed)
+	}
+
+	logger.mu.Lock()
+	_, stillOpen := logger.files[sessionID]
+	logger.mu.Unlock()
+	if stillOpen {
+		t.Fatalf("session %s still has a file open after date rollover sweep", sessionID)
+	}
+
+	// Writing again reopens under today's dir, in append mode, without
+	// touching yesterday's file or losing its content.
+	if err := logger.LogFork(sessionID, "anthropic", 1, "parent-session"); err != nil {
+		t.Fatalf("LogFork after rollover: %v", err)
+	}
+
+	day2Path := filepath.Join(tmpDir, upstream, "2026-01-14", sessionID+".jsonl")
+	if _, err := os.Stat(day2Path); err != nil {
+		t.Fatalf("expected day-2 file at %s: %v", day2Path, err)
+	}
+
+	day1Data, err := os.ReadFile(day1Path)
+	if err != nil {
+		t.Fatalf("day-1 file unreadable after rollover: %v", err)
+	}
+	if !strings.Contains(string(day1Data), "session_start") {
+		t.Fatalf("day-1 file lost its content after rollover: %q", day1Data)
+	}
+}
+
+// hasDeletedFD reports whether this process currently holds an fd whose
+// /proc/self/fd symlink target is path suffixed with the kernel's
+// "(deleted)" marker - the Linux signal that a file is unlinked but still
+// held open by some descriptor.
+func hasDeletedFD(t *testing.T, path string) bool {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("cannot read /proc/self/fd (non-Linux?): %v", err)
+	}
+	want := path + " (deleted)"
+	for _, e := range entries {
+		link, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if err != nil {
+			continue
+		}
+		if link == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestLogger_DeletedIdleFile_ReleasesDescriptor is the disk-space half of
+// the bug report: deleting a log file (what the PRI-3457 pruner does)
+// does not free its blocks while this process still holds an open
+// descriptor pointing at it. This proves both ends - that an open-but-
+// unlinked descriptor is detectable via /proc/self/fd ("(deleted)"), and
+// that CloseIdleFiles makes it go away.
+func TestLogger_DeletedIdleFile_ReleasesDescriptor(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	sessionID := "20260113-102345-deleted"
+	upstream := "api.anthropic.com"
+	if err := logger.LogSessionStart(sessionID, "anthropic", upstream); err != nil {
+		t.Fatalf("LogSessionStart: %v", err)
+	}
+
+	today := time.Now().Format("2006-01-02")
+	path := filepath.Join(tmpDir, upstream, today, sessionID+".jsonl")
+
+	// Simulate the pruner deleting the file while the Logger still has it
+	// open for append - exactly what PRI-3457's Pruner would do to any
+	// file not reported by ActiveLogFiles.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("os.Remove(%s): %v", path, err)
+	}
+
+	if !hasDeletedFD(t, path) {
+		t.Fatalf("expected an open fd pointing at deleted file %s before CloseIdleFiles; the kernel has nothing to detect the leak with if this isn't true", path)
+	}
+
+	base := time.Now()
+	logger.now = func() time.Time { return base.Add(logger.idleTimeout + time.Minute) }
+
+	if closed := logger.CloseIdleFiles(); closed != 1 {
+		t.Fatalf("CloseIdleFiles() = %d, want 1", closed)
+	}
+
+	if hasDeletedFD(t, path) {
+		t.Fatalf("fd pointing at deleted file %s is still open after CloseIdleFiles; disk space was not released", path)
+	}
+}
+
+// TestLogger_StartStop_Idempotent exercises the real background goroutine
+// end to end (not just CloseIdleFiles called directly): a short sweep
+// interval, idle sessions, Start, and a wait for the sweep to actually
+// run and close them - plus Start/Stop idempotency, matching the
+// lifecycle contract the rest of this codebase uses for its other
+// background loops.
+func TestLogger_StartStop_Idempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+
+	logger.sweepInterval = 10 * time.Millisecond
+	logger.idleTimeout = 10 * time.Millisecond
+
+	openNSessions(t, logger, 5)
+
+	logger.Start()
+	logger.Start() // second call must be a no-op, not a second goroutine
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		logger.mu.Lock()
+		open := len(logger.files)
+		logger.mu.Unlock()
+		if open == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background sweep never closed idle sessions; %d still open", open)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	logger.Stop()
+	logger.Stop() // idempotent
+
+	// Close must not hang or panic after Stop already ran.
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close after Stop: %v", err)
+	}
+}
+
+// TestLogger_ConcurrentWritesAndSweep writes from many goroutines while
+// the idle sweep runs concurrently, to be run with -race: getFile's
+// rollover/close path and CloseIdleFiles both mutate l.files and must
+// never race or panic on a file closed out from under a concurrent
+// writer.
+func TestLogger_ConcurrentWritesAndSweep(t *testing.T) {
+	tmpDir := t.TempDir()
+	logger, err := NewLogger(tmpDir)
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	defer logger.Close()
+
+	logger.sweepInterval = time.Millisecond
+	logger.idleTimeout = time.Millisecond
+	logger.Start()
+	defer logger.Stop()
+
+	const sessions = 8
+	const writesPerSession = 50
+
+	var wg sync.WaitGroup
+	for i := 0; i < sessions; i++ {
+		sessionID := fmt.Sprintf("20260113-102345-race%d", i)
+		upstream := fmt.Sprintf("race-upstream-%d.example.com", i)
+		wg.Add(1)
+		go func(sessionID, upstream string) {
+			defer wg.Done()
+			if err := logger.LogSessionStart(sessionID, "anthropic", upstream); err != nil {
+				t.Errorf("LogSessionStart(%s): %v", sessionID, err)
+				return
+			}
+			for j := 0; j < writesPerSession; j++ {
+				if err := logger.LogObservation(sessionID, "anthropic", map[string]any{"type": "observation", "n": j}); err != nil {
+					t.Errorf("LogObservation(%s, %d): %v", sessionID, j, err)
+					return
+				}
+			}
+		}(sessionID, upstream)
+	}
+	wg.Wait()
 }
