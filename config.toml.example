@@ -8,6 +8,24 @@ port = 12071
 # sessions.db is stored inside this directory
 log_dir = "./logs"
 
+# Request-log pruning (PRI-3457): runs at startup and then hourly, but only
+# if one of the two settings below is non-zero. Default is 0/0 - fully
+# disabled, no deletion of any kind - because pruning only matters for a
+# long-lived sidecar against a persistent data disk, which isn't every
+# install of this binary. sen-core's docker-compose sets both (14 days /
+# 5 GiB) for colleague boxes; uncomment and adjust here for any other
+# deployment that wants the same protection.
+
+# Delete files under log_dir older than this many days (mtime-based).
+# 0 (the default) disables age-based pruning entirely.
+# log_retention_days = 14
+
+# Total-size cap in bytes for log_dir; once over, the oldest files are
+# deleted first until back under the cap. 0 (the default) disables the
+# size cap entirely. Either setting works alone - e.g. age pruning with no
+# cap, or a cap with no age limit.
+# log_max_bytes = 5368709120
+
 listen_host = "localhost"   # bind address; defaults to "localhost" (loopback-only)
                             # SECURITY: this proxy has no authentication of its own.
                             # Binding to any non-loopback address (e.g. a container bridge IP or 0.0.0.0)
