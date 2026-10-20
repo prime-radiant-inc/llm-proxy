@@ -49,6 +49,20 @@ type Logger struct {
 	files     map[string]*os.File
 	upstreams map[string]string // sessionID -> upstream
 	contexts  sync.Map          // requestID -> RequestLogContext
+
+	// idleTimeout and sweepInterval govern the background sweep started by
+	// Start (see CloseIdleFiles). Defaults are set in NewLogger; tests in
+	// this package shrink them to exercise the goroutine without a real
+	// wait. now defaults to time.Now and is likewise only ever overridden
+	// by tests, to fake elapsed idle time and date rollover without
+	// touching the system clock.
+	idleTimeout   time.Duration
+	sweepInterval time.Duration
+	now           func() time.Time
+
+	started bool
+	stopCh  chan struct{}
+	doneCh  chan struct{}
 }
 
 func getMachineID() string {
@@ -65,20 +79,135 @@ func getMachineID() string {
 	return username + "@" + hostname
 }
 
+// defaultSessionIdleTimeout is how long a session's log file can go
+// without a write before CloseIdleFiles closes it. 15 minutes comfortably
+// outlives a normal pause between turns in an interactive coding session
+// (seconds to low single-digit minutes) while still reclaiming the
+// descriptor - and, for a file the pruner (PRI-3457) has since unlinked,
+// the disk space it held - well within an operator's debugging window
+// instead of only at the next process restart.
+const defaultSessionIdleTimeout = 15 * time.Minute
+
+// defaultSessionSweepInterval is how often Start's background goroutine
+// calls CloseIdleFiles. A third of defaultSessionIdleTimeout bounds how
+// long a file can overstay its idle threshold before the next sweep
+// catches it, without walking the open-files map often enough to show up
+// as real overhead on a busy proxy.
+const defaultSessionSweepInterval = 5 * time.Minute
+
 func NewLogger(baseDir string) (*Logger, error) {
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
 	return &Logger{
-		baseDir:   baseDir,
-		machineID: getMachineID(),
-		files:     make(map[string]*os.File),
-		upstreams: make(map[string]string),
+		baseDir:       baseDir,
+		machineID:     getMachineID(),
+		files:         make(map[string]*os.File),
+		upstreams:     make(map[string]string),
+		idleTimeout:   defaultSessionIdleTimeout,
+		sweepInterval: defaultSessionSweepInterval,
+		now:           time.Now,
 	}, nil
 }
 
+// Start launches the background goroutine that closes idle or
+// date-rolled-over session files (see CloseIdleFiles) on sweepInterval.
+// NewServer calls Start once, right after NewLogger, so the sweep is
+// running before the proxy serves its first request. A second call is a
+// no-op (idempotent).
+func (l *Logger) Start() {
+	l.mu.Lock()
+	if l.started {
+		l.mu.Unlock()
+		return
+	}
+	l.started = true
+	l.stopCh = make(chan struct{})
+	l.doneCh = make(chan struct{})
+	stopCh, doneCh := l.stopCh, l.doneCh
+	interval := l.sweepInterval
+	l.mu.Unlock()
+
+	go func() {
+		defer close(doneCh)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				l.CloseIdleFiles()
+			}
+		}
+	}()
+}
+
+// Stop signals the background sweep goroutine to exit and waits for it to
+// finish. Idempotent; safe to call even if Start was never called. Close
+// calls Stop itself, so callers that only ever use Close (every existing
+// caller except NewServer) see no behavior change.
+func (l *Logger) Stop() {
+	l.mu.Lock()
+	if !l.started {
+		l.mu.Unlock()
+		return
+	}
+	stopCh, doneCh := l.stopCh, l.doneCh
+	l.started = false
+	l.mu.Unlock()
+
+	close(stopCh)
+	<-doneCh
+}
+
+// CloseIdleFiles closes every open session log file that hasn't been
+// written to in idleTimeout, or whose date directory no longer matches
+// today (the session kept writing across midnight and rolled into a new
+// <date> directory that was never opened under the old handle - see
+// getFile's own rollover check for the write-path side of this). Closing
+// here is safe even if the session writes again afterward: getFile
+// reopens the file with O_APPEND, so no data is lost or overwritten - a
+// session that resumes after a quiet spell just pays for one extra open().
+//
+// This is what actually frees disk space for a file the pruner (PRI-3457)
+// has deleted: unlinking a directory entry does not reclaim the blocks of
+// a file any process - including this one - still holds open. Returns the
+// number of files closed, for tests.
+func (l *Logger) CloseIdleFiles() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.files == nil {
+		return 0
+	}
+
+	now := l.now()
+	today := now.Format("2006-01-02")
+	closed := 0
+	for sessionID, f := range l.files {
+		rolled := filepath.Base(filepath.Dir(f.Name())) != today
+
+		idle := true
+		if info, err := f.Stat(); err == nil {
+			idle = now.Sub(info.ModTime()) >= l.idleTimeout
+		}
+
+		if !rolled && !idle {
+			continue
+		}
+
+		f.Close()
+		delete(l.files, sessionID)
+		closed++
+	}
+	return closed
+}
+
 func (l *Logger) Close() error {
+	l.Stop()
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -90,16 +219,32 @@ func (l *Logger) Close() error {
 	return nil
 }
 
-func (l *Logger) getFile(sessionID string) (*os.File, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
+// getFileLocked returns the open file for sessionID, opening (or
+// reopening, across a date rollover) it as needed. Callers must hold
+// l.mu; it is deliberately not a self-locking method. writeEntry and
+// CloseIdleFiles both need "pick/open the file" and "use or close it" to
+// happen as one atomic step under the same lock - splitting them (as a
+// self-locking getFile once did, dropping the lock between choosing f and
+// writing to it) left a window where the idle sweep could close f out from
+// under an in-flight write ("file already closed"), caught by -race plus a
+// concurrent-writers-and-sweep stress test (TestLogger_ConcurrentWritesAndSweep).
+func (l *Logger) getFileLocked(sessionID string) (*os.File, error) {
 	if l.files == nil {
 		return nil, fmt.Errorf("logger is closed")
 	}
 
+	dateStr := l.now().Format("2006-01-02")
+
 	if f, ok := l.files[sessionID]; ok {
-		return f, nil
+		if filepath.Base(filepath.Dir(f.Name())) == dateStr {
+			return f, nil
+		}
+		// The date rolled over while this session's file was still open.
+		// Close it - it's done, and holding it open would both leak the fd
+		// and keep writing into yesterday's file - and fall through to open
+		// today's.
+		f.Close()
+		delete(l.files, sessionID)
 	}
 
 	// Look up the upstream for this session
@@ -109,7 +254,6 @@ func (l *Logger) getFile(sessionID string) (*os.File, error) {
 	}
 
 	// Create directory: <baseDir>/<upstream>/<YYYY-MM-DD>/
-	dateStr := time.Now().Format("2006-01-02")
 	logDir := filepath.Join(l.baseDir, upstream, dateStr)
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return nil, err
@@ -127,11 +271,6 @@ func (l *Logger) getFile(sessionID string) (*os.File, error) {
 }
 
 func (l *Logger) writeEntry(sessionID string, entry interface{}) error {
-	f, err := l.getFile(sessionID)
-	if err != nil {
-		return err
-	}
-
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return err
@@ -139,6 +278,11 @@ func (l *Logger) writeEntry(sessionID string, entry interface{}) error {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	f, err := l.getFileLocked(sessionID)
+	if err != nil {
+		return err
+	}
 
 	_, err = f.Write(append(data, '\n'))
 	return err

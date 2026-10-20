@@ -26,6 +26,14 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 
+	// Close session files that have gone idle or rolled to a new date so a
+	// long-lived proxy doesn't accumulate open file descriptors forever
+	// (and so disk space from a deleted log file is actually freed once
+	// this process stops holding it open). Logger.Close (called on every
+	// error return below, and from Server.Close) stops this goroutine
+	// itself, so no separate Stop call is needed here.
+	fileLogger.Start()
+
 	// Create LokiExporter if enabled and URL is set
 	var lokiExporter *LokiExporter
 	if cfg.Loki.Enabled && cfg.Loki.URL != "" {
