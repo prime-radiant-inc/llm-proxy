@@ -421,3 +421,119 @@ func TestLoadConfigFromTOML_AllowedUpstreamsAbsentIsEmpty(t *testing.T) {
 		t.Errorf("expected empty AllowedUpstreams (default-open), got %v", cfg.AllowedUpstreams)
 	}
 }
+
+// --- PRI-3457: log retention / size-cap pruning config -------------------
+
+func TestDefaultConfig_LogPruning(t *testing.T) {
+	// Jesse's call: pruning defaults to fully OFF in the bare binary. It
+	// only matters for a long-lived sidecar against a persistent data disk
+	// (colleague boxes), which sen-core's docker-compose enables explicitly
+	// (14 days / 5 GiB) via LLM_PROXY_LOG_RETENTION_DAYS/LLM_PROXY_LOG_MAX_BYTES.
+	cfg := DefaultConfig()
+	if cfg.LogRetentionDays != 0 {
+		t.Errorf("expected default LogRetentionDays 0 (disabled), got %d", cfg.LogRetentionDays)
+	}
+	if cfg.LogMaxBytes != 0 {
+		t.Errorf("expected default LogMaxBytes 0 (disabled), got %d", cfg.LogMaxBytes)
+	}
+}
+
+func TestLoadConfigFromEnv_LogRetentionDays(t *testing.T) {
+	t.Setenv("LLM_PROXY_LOG_RETENTION_DAYS", "30")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	if cfg.LogRetentionDays != 30 {
+		t.Errorf("expected LogRetentionDays 30, got %d", cfg.LogRetentionDays)
+	}
+}
+
+func TestLoadConfigFromEnv_LogRetentionDaysZeroDisables(t *testing.T) {
+	t.Setenv("LLM_PROXY_LOG_RETENTION_DAYS", "0")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	if cfg.LogRetentionDays != 0 {
+		t.Errorf("expected LogRetentionDays 0 (disabled), got %d", cfg.LogRetentionDays)
+	}
+}
+
+func TestLoadConfigFromEnv_LogMaxBytes(t *testing.T) {
+	t.Setenv("LLM_PROXY_LOG_MAX_BYTES", "1073741824")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	if cfg.LogMaxBytes != 1073741824 {
+		t.Errorf("expected LogMaxBytes 1073741824, got %d", cfg.LogMaxBytes)
+	}
+}
+
+func TestLoadConfigFromEnv_LogMaxBytesZeroDisables(t *testing.T) {
+	t.Setenv("LLM_PROXY_LOG_MAX_BYTES", "0")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	if cfg.LogMaxBytes != 0 {
+		t.Errorf("expected LogMaxBytes 0 (disabled), got %d", cfg.LogMaxBytes)
+	}
+}
+
+func TestLoadConfigFromEnv_LogPruningInvalidValuesIgnored(t *testing.T) {
+	t.Setenv("LLM_PROXY_LOG_RETENTION_DAYS", "not-a-number")
+	t.Setenv("LLM_PROXY_LOG_MAX_BYTES", "also-not-a-number")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	// Default is 0/0 (disabled); an invalid env value must keep that, not
+	// coerce to some other value.
+	if cfg.LogRetentionDays != 0 {
+		t.Errorf("invalid LLM_PROXY_LOG_RETENTION_DAYS should keep default 0, got %d", cfg.LogRetentionDays)
+	}
+	if cfg.LogMaxBytes != 0 {
+		t.Errorf("invalid LLM_PROXY_LOG_MAX_BYTES should keep default 0, got %d", cfg.LogMaxBytes)
+	}
+}
+
+func TestLoadConfigFromEnv_LogRetentionDaysNegativeTreatedAsDisabled(t *testing.T) {
+	t.Setenv("LLM_PROXY_LOG_RETENTION_DAYS", "-1")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	if cfg.LogRetentionDays != -1 {
+		t.Errorf("expected the raw negative value to pass through (Pruner treats <= 0 as disabled), got %d", cfg.LogRetentionDays)
+	}
+}
+
+func TestLoadConfigFromTOML_LogPruning(t *testing.T) {
+	tomlContent := `
+log_retention_days = 7
+log_max_bytes = 2147483648
+`
+	cfg, err := LoadConfigFromTOML([]byte(tomlContent))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LogRetentionDays != 7 {
+		t.Errorf("expected LogRetentionDays 7, got %d", cfg.LogRetentionDays)
+	}
+	if cfg.LogMaxBytes != 2147483648 {
+		t.Errorf("expected LogMaxBytes 2147483648, got %d", cfg.LogMaxBytes)
+	}
+}
+
+func TestLoadConfigFromTOML_LogPruningZeroDisables(t *testing.T) {
+	tomlContent := `
+log_retention_days = 0
+log_max_bytes = 0
+`
+	cfg, err := LoadConfigFromTOML([]byte(tomlContent))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LogRetentionDays != 0 {
+		t.Errorf("expected LogRetentionDays 0 (disabled) from explicit TOML zero, got %d", cfg.LogRetentionDays)
+	}
+	if cfg.LogMaxBytes != 0 {
+		t.Errorf("expected LogMaxBytes 0 (disabled) from explicit TOML zero, got %d", cfg.LogMaxBytes)
+	}
+}

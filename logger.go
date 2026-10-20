@@ -288,6 +288,25 @@ func (l *Logger) writeEntry(sessionID string, entry interface{}) error {
 	return err
 }
 
+// ActiveLogFiles returns the set of session log file paths the Logger
+// currently has open for append, keyed by filepath.Clean'd path. The pruner
+// (PRI-3457) consults this before deleting anything so a session mid-request
+// is never pruned out from under it. Safe to call after Close (returns an
+// empty, non-nil map).
+func (l *Logger) ActiveLogFiles() map[string]struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	active := make(map[string]struct{}, len(l.files))
+	for _, f := range l.files {
+		if f == nil {
+			continue
+		}
+		active[filepath.Clean(f.Name())] = struct{}{}
+	}
+	return active
+}
+
 // RegisterUpstream registers an upstream host for a session.
 // This is used when a forked session needs to write without a session_start.
 func (l *Logger) RegisterUpstream(sessionID, upstream string) {

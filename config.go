@@ -77,6 +77,13 @@ type Config struct {
 	// (default-open for the general-purpose binary). Deployments supply concrete
 	// host values; the source names no specific upstream.
 	AllowedUpstreams map[string][]string `toml:"allowed_upstreams"`
+	// PRI-3457: request-log pruning. LogRetentionDays <= 0 disables age-based
+	// pruning; LogMaxBytes <= 0 disables the total-size cap. Default is 0/0
+	// (fully disabled) in this binary; see DefaultConfig. Both apply to
+	// everything under LogDir (the <upstream>/<date>/<session>.jsonl tree),
+	// never to sessions.db or any other top-level file.
+	LogRetentionDays int   `toml:"log_retention_days"`
+	LogMaxBytes      int64 `toml:"log_max_bytes"`
 }
 
 func DefaultConfig() Config {
@@ -98,6 +105,17 @@ func DefaultConfig() Config {
 			CacheSize:   10000,
 			TimeoutStr:  "2s",
 		},
+		// PRI-3457: request-log pruning defaults to OFF (0/0) in the bare
+		// binary. Unbounded growth filled a coworker's data disk and
+		// stopped it for 6 days, but that risk is specific to colleague
+		// boxes running this as a long-lived sidecar against a persistent
+		// data disk - not every llm-proxy install. Jesse's call: sen-core's
+		// docker-compose sets LLM_PROXY_LOG_RETENTION_DAYS=14 and
+		// LLM_PROXY_LOG_MAX_BYTES=5368709120 (5 GiB) for colleague boxes;
+		// the binary itself stays conservative and deletes nothing unless
+		// told to.
+		LogRetentionDays: 0,
+		LogMaxBytes:      0,
 	}
 }
 
@@ -264,6 +282,20 @@ func LoadConfigFromEnv(cfg Config) Config {
 	}
 	if v := os.Getenv("LLM_PROXY_API_TOKEN_SUBSTITUTION_TIMEOUT"); v != "" {
 		cfg.APITokenSubstitution.TimeoutStr = v
+	}
+
+	// PRI-3457: log retention / size cap. An unparseable value is ignored
+	// (keeps whatever the prior layer - TOML or default - set) rather than
+	// silently coercing to 0, which would disable pruning outright.
+	if v := os.Getenv("LLM_PROXY_LOG_RETENTION_DAYS"); v != "" {
+		if days, err := strconv.Atoi(v); err == nil {
+			cfg.LogRetentionDays = days
+		}
+	}
+	if v := os.Getenv("LLM_PROXY_LOG_MAX_BYTES"); v != "" {
+		if maxBytes, err := strconv.ParseInt(v, 10, 64); err == nil {
+			cfg.LogMaxBytes = maxBytes
+		}
 	}
 
 	return cfg
