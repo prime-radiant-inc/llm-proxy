@@ -998,6 +998,365 @@ func TestMultiWriterLogObservation(t *testing.T) {
 	}
 }
 
+// --- PRI-3040/PRI-2489, mantle/Bedrock path: LogObservation ----------------
+//
+// mantle.go's writeMantleObservation hands LogObservation ONE entry map used
+// for both destinations (unlike LogRequest/LogResponse, which build a
+// separate map per destination). mantle.go nests body/chunks text under
+// entry["request"]["body"] (logMantleRequestObservation) and
+// entry["response"]["body"]/entry["response"]["chunks"]
+// (logMantleResponseObservation, logMantleAbortedResponseObservation).
+
+const secretMantleRequestText = "a secret mantle prompt that must never reach Loki"
+const secretMantleResponseText = "a secret mantle response that must never reach Loki"
+
+func mantleRequestEntry(bodyText string) map[string]any {
+	return map[string]any{
+		"type": "request",
+		"_meta": map[string]any{
+			"schema_version": "telemetry-contract-v0",
+		},
+		"request": map[string]any{
+			"method":        "POST",
+			"ingress_path":  "/cbrun/run-test/mantle/v1/responses",
+			"raw_query":     "",
+			"proxy_route":   "mantle",
+			"upstream_host": "bedrock-mantle.us-west-2.api.aws",
+			"upstream_path": "/openai/v1/responses",
+			"body":          bodyText,
+		},
+	}
+}
+
+func mantleResponseEntryNonStreaming(bodyText string) map[string]any {
+	return map[string]any{
+		"type":        "response",
+		"status":      200,
+		"timing":      ResponseTiming{TTFBMs: 50, TotalMs: 150},
+		"termination": TerminationEOF,
+		"_meta": map[string]any{
+			"schema_version": "telemetry-contract-v0",
+		},
+		"response": map[string]any{
+			"body": bodyText,
+		},
+		"path":              "/openai/v1/responses",
+		"upstream":          "bedrock-mantle.us-west-2.api.aws",
+		"metering_provider": "bedrock",
+		"capture_version":   CaptureVersion,
+	}
+}
+
+func mantleResponseEntryStreaming(bodyText string) map[string]any {
+	chunks := []StreamChunk{
+		{Timestamp: time.Now(), DeltaMs: 0, Raw: "data: " + bodyText},
+	}
+	return map[string]any{
+		"type":        "response",
+		"status":      200,
+		"timing":      ResponseTiming{TTFBMs: 50, TotalMs: 150},
+		"termination": TerminationEOF,
+		"_meta": map[string]any{
+			"schema_version": "telemetry-contract-v0",
+		},
+		"response": map[string]any{
+			// mantle.go sets both chunks and the response.completed-extracted
+			// body when present (mantleResponseBodyFromStream); exercise both.
+			"chunks": chunks,
+			"body":   map[string]any{"text": bodyText},
+		},
+		"path":              "/openai/v1/responses",
+		"upstream":          "bedrock-mantle.us-west-2.api.aws",
+		"metering_provider": "bedrock",
+		"capture_version":   CaptureVersion,
+	}
+}
+
+func TestMultiWriter_LogObservation_MantleRequest_LokiOmitsBodyByDefault(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+
+	entry := mantleRequestEntry(secretMantleRequestText)
+	if err := mw.LogObservation("mantle-session", "openai", entry); err != nil {
+		t.Fatalf("LogObservation returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	request, ok := lokiExporter.pushCalls[0].entry["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("Expected Loki entry to have a request map, got %#v", lokiExporter.pushCalls[0].entry)
+	}
+	if _, ok := request["body"]; ok {
+		t.Errorf("Loki request observation must not contain body by default, got: %#v", request["body"])
+	}
+	if omitted, ok := request["body_omitted"].(bool); !ok || !omitted {
+		t.Errorf("Expected request.body_omitted=true in Loki entry, got: %#v", request["body_omitted"])
+	}
+	for _, key := range []string{"method", "ingress_path", "upstream_host", "upstream_path"} {
+		if _, ok := request[key]; !ok {
+			t.Errorf("Expected metadata key %q to still be present in Loki request observation, got: %#v", key, request)
+		}
+	}
+}
+
+func TestMultiWriter_LogObservation_MantleRequest_LokiIncludesBodyWhenFlagSet(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+	mw.includeBody = true
+
+	entry := mantleRequestEntry(secretMantleRequestText)
+	if err := mw.LogObservation("mantle-session", "openai", entry); err != nil {
+		t.Fatalf("LogObservation returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	request, ok := lokiExporter.pushCalls[0].entry["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("Expected Loki entry to have a request map, got %#v", lokiExporter.pushCalls[0].entry)
+	}
+	if got := request["body"]; got != secretMantleRequestText {
+		t.Errorf("Expected Loki request observation body %q, got %#v", secretMantleRequestText, got)
+	}
+	if _, ok := request["body_omitted"]; ok {
+		t.Errorf("Did not expect request.body_omitted when includeBody=true, got: %#v", request["body_omitted"])
+	}
+}
+
+func TestMultiWriter_LogObservation_MantleResponseNonStreaming_LokiOmitsBodyByDefault(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+
+	entry := mantleResponseEntryNonStreaming(secretMantleResponseText)
+	if err := mw.LogObservation("mantle-session", "openai", entry); err != nil {
+		t.Fatalf("LogObservation returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	response, ok := lokiExporter.pushCalls[0].entry["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("Expected Loki entry to have a response map, got %#v", lokiExporter.pushCalls[0].entry)
+	}
+	if _, ok := response["body"]; ok {
+		t.Errorf("Loki response observation must not contain body by default, got: %#v", response["body"])
+	}
+	if omitted, ok := response["body_omitted"].(bool); !ok || !omitted {
+		t.Errorf("Expected response.body_omitted=true in Loki entry, got: %#v", response["body_omitted"])
+	}
+	// Top-level metadata (status/timing/termination/path/upstream/...) must
+	// still be present.
+	for _, key := range []string{"status", "timing", "termination", "path", "upstream", "metering_provider", "capture_version", "type"} {
+		if _, ok := lokiExporter.pushCalls[0].entry[key]; !ok {
+			t.Errorf("Expected metadata key %q to still be present in Loki entry, got: %#v", key, lokiExporter.pushCalls[0].entry)
+		}
+	}
+}
+
+func TestMultiWriter_LogObservation_MantleResponseNonStreaming_LokiIncludesBodyWhenFlagSet(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+	mw.includeBody = true
+
+	entry := mantleResponseEntryNonStreaming(secretMantleResponseText)
+	if err := mw.LogObservation("mantle-session", "openai", entry); err != nil {
+		t.Fatalf("LogObservation returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	response, ok := lokiExporter.pushCalls[0].entry["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("Expected Loki entry to have a response map, got %#v", lokiExporter.pushCalls[0].entry)
+	}
+	if got := response["body"]; got != secretMantleResponseText {
+		t.Errorf("Expected Loki response observation body %q, got %#v", secretMantleResponseText, got)
+	}
+	if _, ok := response["body_omitted"]; ok {
+		t.Errorf("Did not expect response.body_omitted when includeBody=true, got: %#v", response["body_omitted"])
+	}
+}
+
+func TestMultiWriter_LogObservation_MantleResponseStreaming_LokiOmitsBodyAndChunksByDefault(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+
+	entry := mantleResponseEntryStreaming(secretMantleResponseText)
+	if err := mw.LogObservation("mantle-session", "openai", entry); err != nil {
+		t.Fatalf("LogObservation returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	response, ok := lokiExporter.pushCalls[0].entry["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("Expected Loki entry to have a response map, got %#v", lokiExporter.pushCalls[0].entry)
+	}
+	if _, ok := response["chunks"]; ok {
+		t.Errorf("Loki response observation must not contain chunks by default, got: %#v", response["chunks"])
+	}
+	if _, ok := response["body"]; ok {
+		t.Errorf("Loki response observation must not contain body by default, got: %#v", response["body"])
+	}
+	if omitted, ok := response["body_omitted"].(bool); !ok || !omitted {
+		t.Errorf("Expected response.body_omitted=true in Loki entry, got: %#v", response["body_omitted"])
+	}
+}
+
+func TestMultiWriter_LogObservation_MantleResponseStreaming_LokiIncludesChunksAndBodyWhenFlagSet(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+	mw.includeBody = true
+
+	entry := mantleResponseEntryStreaming(secretMantleResponseText)
+	if err := mw.LogObservation("mantle-session", "openai", entry); err != nil {
+		t.Fatalf("LogObservation returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	response, ok := lokiExporter.pushCalls[0].entry["response"].(map[string]any)
+	if !ok {
+		t.Fatalf("Expected Loki entry to have a response map, got %#v", lokiExporter.pushCalls[0].entry)
+	}
+	gotChunks, ok := response["chunks"].([]StreamChunk)
+	if !ok || len(gotChunks) != 1 || !strings.Contains(gotChunks[0].Raw, secretMantleResponseText) {
+		t.Errorf("Expected Loki response observation chunks to contain %q, got %#v", secretMantleResponseText, response["chunks"])
+	}
+	if _, ok := response["body"]; !ok {
+		t.Errorf("Expected Loki response observation to still have body when includeBody=true, got: %#v", response)
+	}
+	if _, ok := response["body_omitted"]; ok {
+		t.Errorf("Did not expect response.body_omitted when includeBody=true, got: %#v", response["body_omitted"])
+	}
+}
+
+// TestMultiWriter_LogObservation_FileLoggerAlwaysGetsFullEntryRegardlessOfLokiFlag
+// is the LogObservation analogue of the LogRequest/LogResponse aliasing
+// guards above. LogObservation is the riskiest of the three: the caller
+// hands it ONE entry map, used for both m.file.LogObservation and (after
+// stripping, when includeBody is false) m.loki.Push - so stripping MUST
+// build a copy, never mutate the shared map in place. This test proves it
+// by mutating the map captured by the Loki pusher mock (and its nested
+// request/response maps) after the call returns, then asserting the file
+// logger's independently-recorded entry - the SAME object the test
+// constructed - still has the original body/chunks untouched.
+func TestMultiWriter_LogObservation_FileLoggerAlwaysGetsFullEntryRegardlessOfLokiFlag(t *testing.T) {
+	scenarios := map[string]func(string) map[string]any{
+		"request":              mantleRequestEntry,
+		"response-nonstreaming": mantleResponseEntryNonStreaming,
+		"response-streaming":    mantleResponseEntryStreaming,
+	}
+	secretByScenario := map[string]string{
+		"request":               secretMantleRequestText,
+		"response-nonstreaming": secretMantleResponseText,
+		"response-streaming":    secretMantleResponseText,
+	}
+
+	for name, build := range scenarios {
+		for _, includeBody := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/includeBody=%v", name, includeBody), func(t *testing.T) {
+				fileLogger := newMockFileLogger()
+				lokiExporter := newMockLokiExporter(nil)
+				mw := NewMultiWriter(fileLogger, lokiExporter)
+				mw.includeBody = includeBody
+
+				secret := secretByScenario[name]
+				entry := build(secret)
+
+				if err := mw.LogObservation("mantle-session", "openai", entry); err != nil {
+					t.Fatalf("LogObservation returned error: %v", err)
+				}
+
+				if len(fileLogger.observationCalls) != 1 {
+					t.Fatalf("Expected 1 observation call to file logger, got %d", len(fileLogger.observationCalls))
+				}
+				recorded := fileLogger.observationCalls[0].entry
+
+				// Sanity: the file logger's entry has the secret text somewhere,
+				// before we touch the Loki side at all.
+				if !entryContainsText(recorded, secret) {
+					t.Fatalf("File logger's recorded entry is missing the full body/chunks text before any mutation: %#v", recorded)
+				}
+
+				if len(lokiExporter.pushCalls) != 1 {
+					t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+				}
+
+				if !includeBody {
+					// Aliasing guard: mutate the map (and its nested request/
+					// response maps, if present) handed to the Loki pusher
+					// AFTER the call returns, simulating a future refactor
+					// that strips keys from a map shared with the file logger
+					// instead of a copy. Only meaningful when includeBody is
+					// false - that's the branch that must build a copy at all.
+					// When includeBody is true, LogObservation intentionally
+					// pushes the SAME map to both destinations (nothing needs
+					// stripping), so mutating the one-and-only map afterward is
+					// expected, not a bug - covered instead by the dedicated
+					// *_LokiIncludesBodyWhenFlagSet tests above.
+					pushed := lokiExporter.pushCalls[0].entry
+					for _, key := range []string{"request", "response"} {
+						if nested, ok := pushed[key].(map[string]any); ok {
+							for k := range nested {
+								delete(nested, k)
+							}
+							nested["body"] = "INJECTED-AFTER-THE-FACT"
+							nested["chunks"] = "INJECTED-AFTER-THE-FACT"
+						}
+					}
+					for k := range pushed {
+						delete(pushed, k)
+					}
+					pushed["body"] = "INJECTED-AFTER-THE-FACT"
+
+					if !entryContainsText(recorded, secret) {
+						t.Fatalf("File logger's recorded entry changed after mutating the Loki-pushed map (and its nested maps) - entry is aliased! got %#v", recorded)
+					}
+				}
+			})
+		}
+	}
+}
+
+// entryContainsText reports whether secret appears anywhere in entry's
+// "request"/"response" maps, under "body" (any shape, stringified) or
+// "chunks" ([]StreamChunk, checked via Raw).
+func entryContainsText(entry map[string]interface{}, secret string) bool {
+	for _, key := range []string{"request", "response"} {
+		nested, ok := entry[key].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if body, ok := nested["body"]; ok {
+			if strings.Contains(fmt.Sprintf("%v", body), secret) {
+				return true
+			}
+		}
+		if chunks, ok := nested["chunks"].([]StreamChunk); ok {
+			for _, c := range chunks {
+				if strings.Contains(c.Raw, secret) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // computeSHA256 computes the hex-encoded SHA256 of data
 func computeSHA256(data []byte) string {
 	h := sha256.Sum256(data)

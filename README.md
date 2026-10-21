@@ -105,7 +105,7 @@ Or use environment variables:
 | `LLM_PROXY_LOKI_RETRY_MAX` | Max retry attempts |
 | `LLM_PROXY_LOKI_USE_GZIP` | Set to `true` or `1` for compression |
 | `LLM_PROXY_LOKI_ENVIRONMENT` | Environment label |
-| `LLM_PROXY_LOKI_INCLUDE_BODY` | Set to `true` or `1` to include request/response bodies (and streamed chunk text) in the entries pushed to Loki. **Default: unset/false - metadata only** (company rule PRI-3040/PRI-2489). When false, `request`/`response` Loki entries carry `body_omitted: true` instead of the body/chunks, keeping everything else (method, path, obfuscated headers, status, size, timing, request_sha, upstream, `_meta`, ...). The on-disk file log and any downstream archive are unaffected either way - they always get the full body. |
+| `LLM_PROXY_LOKI_INCLUDE_BODY` | Set to `true` or `1` to include request/response bodies (and streamed chunk text) in the entries pushed to Loki. **Default: unset/false - metadata only** (company rule PRI-3040/PRI-2489). When false, `request`/`response` Loki entries carry `body_omitted: true` instead of the body/chunks, keeping everything else (method, path, obfuscated headers, status, size, timing, request_sha, upstream, `_meta`, ...). Also covers the Bedrock/Mantle passthrough path's free-form observations (`LogObservation`): `body`/`chunks` nested under `request`/`response` are stripped the same way, with `body_omitted: true` added to whichever nested map had something removed. The on-disk file log and any downstream archive are unaffected either way - they always get the full body. |
 
 ### Behavior
 

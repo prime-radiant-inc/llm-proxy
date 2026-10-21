@@ -302,14 +302,74 @@ func (m *MultiWriter) LogResponse(sessionID, provider string, seq int, status in
 	return err
 }
 
+// LogObservation logs a free-form observation entry - used by the Bedrock/
+// Mantle passthrough path (mantle.go's writeMantleObservation) for request,
+// response and error records - to both destinations.
+//
+// Unlike LogRequest/LogResponse, the caller hands this method ONE entry map
+// that is used for both destinations, so (PRI-3040/PRI-2489: Loki gets
+// metadata only) we cannot strip body/chunks from it in place - that would
+// corrupt the file log too, since m.file.LogObservation above got the exact
+// same map reference. stripObservationBody therefore returns a deep-enough
+// COPY (top level, plus fresh copies of the nested "request"/"response"
+// maps mantle.go nests body/chunks under) with body/chunks replaced by
+// body_omitted: true, leaving the original entry - and what the file logger
+// already wrote from it - untouched.
 func (m *MultiWriter) LogObservation(sessionID, provider string, entry map[string]any) error {
 	err := m.file.LogObservation(sessionID, provider, entry)
 
 	if m.loki != nil {
-		m.loki.Push(entry, provider)
+		lokiEntry := entry
+		if !m.includeBody {
+			lokiEntry = stripObservationBody(entry)
+		}
+		m.loki.Push(lokiEntry, provider)
 	}
 
 	return err
+}
+
+// stripBodyFieldsCopy returns a shallow copy of in with any "body"/"chunks"
+// keys removed and, if either was present, "body_omitted": true added. The
+// input map is never mutated.
+func stripBodyFieldsCopy(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in)+1)
+	for k, v := range in {
+		out[k] = v
+	}
+	stripped := false
+	if _, ok := out["body"]; ok {
+		delete(out, "body")
+		stripped = true
+	}
+	if _, ok := out["chunks"]; ok {
+		delete(out, "chunks")
+		stripped = true
+	}
+	if stripped {
+		out["body_omitted"] = true
+	}
+	return out
+}
+
+// stripObservationBody returns a copy of a mantle-shaped observation entry
+// with body/chunks text removed - at the top level (defensive; no current
+// mantle.go call site puts them there) and inside the nested "request"/
+// "response" maps (mantle.go's logMantleRequestObservation puts
+// request["body"]; logMantleResponseObservation and
+// logMantleAbortedResponseObservation put response["body"]/
+// response["chunks"]). Every map touched is copied, never mutated in place,
+// so the original entry (and the file logger's copy of it) is unaffected.
+func stripObservationBody(entry map[string]any) map[string]any {
+	out := stripBodyFieldsCopy(entry)
+
+	for _, key := range []string{"request", "response"} {
+		if nested, ok := out[key].(map[string]any); ok {
+			out[key] = stripBodyFieldsCopy(nested)
+		}
+	}
+
+	return out
 }
 
 // LogFork logs a fork event to both destinations.
