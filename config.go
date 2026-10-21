@@ -37,6 +37,14 @@ type LokiConfig struct {
 	RetryMax     int    `toml:"retry_max"`   // Maximum retry attempts
 	UseGzip      bool   `toml:"use_gzip"`    // Enable gzip compression
 	Environment  string `toml:"environment"` // Environment label (development, staging, production)
+	// IncludeBody controls whether the request/response entries pushed to Loki
+	// (built in multi_writer.go's LogRequest/LogResponse) carry the raw body
+	// text (and, for streaming responses, the raw chunk text). Default false:
+	// company rule PRI-3040/PRI-2489 is that Loki gets metadata only - prompts,
+	// responses, system prompts and tool input/output must not leave the box
+	// via this path. This does NOT affect the on-disk file log or the S3
+	// archive, which always keep the full body regardless of this setting.
+	IncludeBody bool `toml:"include_body"`
 }
 
 // APITokenSubstitutionConfig configures the opt-in API token substitution feature.
@@ -97,6 +105,9 @@ func DefaultConfig() Config {
 			RetryMax:     5,
 			UseGzip:      true,
 			Environment:  "development",
+			// PRI-3040/PRI-2489: Loki gets metadata only by default. A
+			// deployment must opt in explicitly to ship bodies.
+			IncludeBody: false,
 		},
 		ListenHost: "localhost",
 		APITokenSubstitution: APITokenSubstitutionConfig{
@@ -261,6 +272,12 @@ func LoadConfigFromEnv(cfg Config) Config {
 	}
 	if env := os.Getenv("LLM_PROXY_LOKI_ENVIRONMENT"); env != "" {
 		cfg.Loki.Environment = env
+	}
+	// PRI-3040/PRI-2489: Loki gets metadata only. This must be opted into
+	// explicitly per deployment; absent/empty leaves today's metadata-only
+	// behavior unchanged.
+	if includeBody := os.Getenv("LLM_PROXY_LOKI_INCLUDE_BODY"); includeBody != "" {
+		cfg.Loki.IncludeBody = includeBody == "true" || includeBody == "1"
 	}
 
 	if host := os.Getenv("LLM_PROXY_LISTEN_HOST"); host != "" {

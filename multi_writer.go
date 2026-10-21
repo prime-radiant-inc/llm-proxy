@@ -37,6 +37,16 @@ type MultiWriter struct {
 	loki      LokiPusher
 	machineID string
 
+	// includeBody controls whether LogRequest/LogResponse put the raw request/
+	// response body (and, for streaming responses, the raw chunk text) into
+	// the entry map pushed to Loki. Default false (zero value): PRI-3040/
+	// PRI-2489 is that Loki gets metadata only. This NEVER affects what goes
+	// to m.file - the file logger is always called with the full, unmodified
+	// body/chunks, via a separate map/args built independently below, never
+	// derived from (or shared with) the Loki-bound entry. Set via server.go
+	// from cfg.Loki.IncludeBody, same-package direct field assignment.
+	includeBody bool
+
 	// requestContexts stores per-request metadata keyed by requestID.
 	// Set by serveBedrock before logging; consumed by LogRequest/LogResponse.
 	requestContexts sync.Map
@@ -189,16 +199,27 @@ func (m *MultiWriter) LogRequest(sessionID, provider string, seq int, method, pa
 		addBedrockMeta(meta, path)
 		m.addRequestLogContextMeta(meta, requestID)
 
+		// entry is built fresh here, independent of (and never shared with) the
+		// call to m.file.LogRequest above, which already ran against the raw
+		// body argument. Nothing below can leak into or strip from the file log.
 		entry := map[string]interface{}{
 			"type":        "request",
 			"seq":         seq,
 			"method":      method,
 			"path":        path,
 			"headers":     ObfuscateHeaders(headers),
-			"body":        string(body),
 			"size":        len(body),
 			"request_sha": bodySHA,
 			"_meta":       meta,
+		}
+
+		// PRI-3040/PRI-2489: Loki gets metadata only by default. body_omitted
+		// is set so dashboards/queries can see when a body was withheld, rather
+		// than silently having less data than expected.
+		if m.includeBody {
+			entry["body"] = string(body)
+		} else {
+			entry["body_omitted"] = true
 		}
 
 		if up, ok := m.upstreams.Load(sessionID); ok {
@@ -230,6 +251,10 @@ func (m *MultiWriter) LogResponse(sessionID, provider string, seq int, status in
 		}
 		m.addRequestLogContextMeta(meta, requestID)
 
+		// entry is built fresh here, independent of (and never shared with) the
+		// call to m.file.LogResponse above, which already ran against the raw
+		// body/chunks arguments. Nothing below can leak into or strip from the
+		// file log.
 		entry := map[string]interface{}{
 			"type":    "response",
 			"seq":     seq,
@@ -240,10 +265,17 @@ func (m *MultiWriter) LogResponse(sessionID, provider string, seq int, status in
 			"_meta":   meta,
 		}
 
-		if chunks != nil {
-			entry["chunks"] = chunks
+		// PRI-3040/PRI-2489: Loki gets metadata only by default. body_omitted
+		// is set so dashboards/queries can see when a body/chunks were withheld,
+		// rather than silently having less data than expected.
+		if m.includeBody {
+			if chunks != nil {
+				entry["chunks"] = chunks
+			} else {
+				entry["body"] = string(body)
+			}
 		} else {
-			entry["body"] = string(body)
+			entry["body_omitted"] = true
 		}
 
 		if up, ok := m.upstreams.Load(sessionID); ok {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -626,6 +627,11 @@ func TestMultiWriter_LogRequest_IncludesRequestSHA(t *testing.T) {
 	lokiExporter := newMockLokiExporter(&closeOrder)
 
 	mw := NewMultiWriter(fileLogger, lokiExporter)
+	// This test is specifically about the body/SHA round-trip, which only
+	// applies when body shipping to Loki is opted into (PRI-3040/PRI-2489
+	// default is metadata-only; see TestMultiWriter_LogRequest_Loki* below
+	// for the default-off behavior).
+	mw.includeBody = true
 
 	sessionID := "test-session-sha"
 	provider := "anthropic"
@@ -667,6 +673,292 @@ func TestMultiWriter_LogRequest_IncludesRequestSHA(t *testing.T) {
 	expectedSHA := computeSHA256([]byte(bodyFromEntry))
 	if sha != expectedSHA {
 		t.Errorf("SHA mismatch: entry has %s, computed %s", sha, expectedSHA)
+	}
+}
+
+// --- PRI-3040/PRI-2489: Loki gets metadata only ---------------------------
+//
+// LogRequest/LogResponse must default to NOT shipping request/response
+// bodies (or, for streaming responses, raw chunk text) to Loki, and must
+// keep shipping the full body/chunks to the file logger regardless. The
+// flag (MultiWriter.includeBody, wired from LLM_PROXY_LOKI_INCLUDE_BODY /
+// loki.include_body) opts a deployment back into the old behavior.
+
+const secretRequestBody = `{"model":"claude-sonnet-4-20250514","system":"you are a secret system prompt","messages":[{"role":"user","content":"a secret prompt that must never reach Loki"}]}`
+const secretResponseBody = `{"content":[{"type":"text","text":"a secret response that must never reach Loki"}]}`
+
+func TestMultiWriter_LogRequest_LokiOmitsBodyByDefault(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+	// includeBody defaults to false (zero value) - not set here deliberately.
+
+	body := []byte(secretRequestBody)
+	err := mw.LogRequest("session-1", "anthropic", 1, "POST", "/v1/messages", http.Header{}, body, "req-1")
+	if err != nil {
+		t.Fatalf("LogRequest returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	entry := lokiExporter.pushCalls[0].entry
+	if _, ok := entry["body"]; ok {
+		t.Errorf("Loki entry must not contain body by default, got: %#v", entry["body"])
+	}
+	if omitted, ok := entry["body_omitted"].(bool); !ok || !omitted {
+		t.Errorf("Expected body_omitted=true in Loki entry, got: %#v", entry["body_omitted"])
+	}
+	// Metadata must still be present.
+	for _, key := range []string{"method", "path", "headers", "size", "request_sha", "_meta", "type", "seq"} {
+		if _, ok := entry[key]; !ok {
+			t.Errorf("Expected metadata key %q to still be present in Loki entry, entry: %#v", key, entry)
+		}
+	}
+}
+
+func TestMultiWriter_LogRequest_LokiIncludesBodyWhenFlagSet(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+	mw.includeBody = true
+
+	body := []byte(secretRequestBody)
+	err := mw.LogRequest("session-1", "anthropic", 1, "POST", "/v1/messages", http.Header{}, body, "req-1")
+	if err != nil {
+		t.Fatalf("LogRequest returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	entry := lokiExporter.pushCalls[0].entry
+	got, ok := entry["body"].(string)
+	if !ok || got != secretRequestBody {
+		t.Errorf("Expected Loki entry body %q, got %#v", secretRequestBody, entry["body"])
+	}
+	if _, ok := entry["body_omitted"]; ok {
+		t.Errorf("Did not expect body_omitted when includeBody=true, got: %#v", entry["body_omitted"])
+	}
+}
+
+func TestMultiWriter_LogRequest_FileLoggerAlwaysGetsFullBodyRegardlessOfLokiFlag(t *testing.T) {
+	for _, includeBody := range []bool{false, true} {
+		t.Run(fmt.Sprintf("includeBody=%v", includeBody), func(t *testing.T) {
+			fileLogger := newMockFileLogger()
+			lokiExporter := newMockLokiExporter(nil)
+			mw := NewMultiWriter(fileLogger, lokiExporter)
+			mw.includeBody = includeBody
+
+			body := []byte(secretRequestBody)
+			if err := mw.LogRequest("session-1", "anthropic", 1, "POST", "/v1/messages", http.Header{}, body, "req-1"); err != nil {
+				t.Fatalf("LogRequest returned error: %v", err)
+			}
+
+			if len(fileLogger.requestCalls) != 1 {
+				t.Fatalf("Expected 1 request call to file logger, got %d", len(fileLogger.requestCalls))
+			}
+			if got := string(fileLogger.requestCalls[0].body); got != secretRequestBody {
+				t.Errorf("File logger must always receive the full body; got %q, want %q", got, secretRequestBody)
+			}
+
+			// Aliasing guard: mutate the map handed to the Loki pusher AFTER the
+			// call returns (simulating a future refactor that builds one shared
+			// entry map and deletes keys from it rather than building the Loki
+			// entry independently). If LogRequest ever starts handing the file
+			// logger a reference into that same map instead of the raw []byte it
+			// gets today, this mutation would corrupt the file logger's copy and
+			// this assertion would catch it.
+			if len(lokiExporter.pushCalls) != 1 {
+				t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+			}
+			pushedEntry := lokiExporter.pushCalls[0].entry
+			for k := range pushedEntry {
+				delete(pushedEntry, k)
+			}
+			pushedEntry["body"] = "INJECTED-AFTER-THE-FACT"
+
+			if got := string(fileLogger.requestCalls[0].body); got != secretRequestBody {
+				t.Fatalf("File logger's recorded body changed after mutating the Loki-pushed map - entry is aliased! got %q, want %q", got, secretRequestBody)
+			}
+		})
+	}
+}
+
+func TestMultiWriter_LogResponse_NonStreaming_LokiOmitsBodyByDefault(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+
+	body := []byte(secretResponseBody)
+	err := mw.LogResponse("session-1", "anthropic", 1, 200, http.Header{}, body, nil, ResponseTiming{}, "req-1", ResponseCapture{Termination: TerminationEOF})
+	if err != nil {
+		t.Fatalf("LogResponse returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	entry := lokiExporter.pushCalls[0].entry
+	if _, ok := entry["body"]; ok {
+		t.Errorf("Loki entry must not contain body by default, got: %#v", entry["body"])
+	}
+	if omitted, ok := entry["body_omitted"].(bool); !ok || !omitted {
+		t.Errorf("Expected body_omitted=true in Loki entry, got: %#v", entry["body_omitted"])
+	}
+	for _, key := range []string{"status", "headers", "timing", "size", "_meta", "type", "seq"} {
+		if _, ok := entry[key]; !ok {
+			t.Errorf("Expected metadata key %q to still be present in Loki entry, entry: %#v", key, entry)
+		}
+	}
+}
+
+func TestMultiWriter_LogResponse_NonStreaming_LokiIncludesBodyWhenFlagSet(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+	mw.includeBody = true
+
+	body := []byte(secretResponseBody)
+	err := mw.LogResponse("session-1", "anthropic", 1, 200, http.Header{}, body, nil, ResponseTiming{}, "req-1", ResponseCapture{Termination: TerminationEOF})
+	if err != nil {
+		t.Fatalf("LogResponse returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	entry := lokiExporter.pushCalls[0].entry
+	got, ok := entry["body"].(string)
+	if !ok || got != secretResponseBody {
+		t.Errorf("Expected Loki entry body %q, got %#v", secretResponseBody, entry["body"])
+	}
+	if _, ok := entry["body_omitted"]; ok {
+		t.Errorf("Did not expect body_omitted when includeBody=true, got: %#v", entry["body_omitted"])
+	}
+}
+
+func TestMultiWriter_LogResponse_Streaming_LokiOmitsChunksByDefault(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+
+	chunks := []StreamChunk{
+		{Timestamp: time.Now(), DeltaMs: 0, Raw: "data: " + secretResponseBody},
+	}
+	err := mw.LogResponse("session-1", "anthropic", 1, 200, http.Header{}, nil, chunks, ResponseTiming{}, "req-1", ResponseCapture{Termination: TerminationEOF})
+	if err != nil {
+		t.Fatalf("LogResponse returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	entry := lokiExporter.pushCalls[0].entry
+	if _, ok := entry["chunks"]; ok {
+		t.Errorf("Loki entry must not contain chunks by default, got: %#v", entry["chunks"])
+	}
+	if _, ok := entry["body"]; ok {
+		t.Errorf("Loki entry must not contain body by default either, got: %#v", entry["body"])
+	}
+	if omitted, ok := entry["body_omitted"].(bool); !ok || !omitted {
+		t.Errorf("Expected body_omitted=true in Loki entry, got: %#v", entry["body_omitted"])
+	}
+}
+
+func TestMultiWriter_LogResponse_Streaming_LokiIncludesChunksWhenFlagSet(t *testing.T) {
+	fileLogger := newMockFileLogger()
+	lokiExporter := newMockLokiExporter(nil)
+	mw := NewMultiWriter(fileLogger, lokiExporter)
+	mw.includeBody = true
+
+	chunks := []StreamChunk{
+		{Timestamp: time.Now(), DeltaMs: 0, Raw: "data: " + secretResponseBody},
+	}
+	err := mw.LogResponse("session-1", "anthropic", 1, 200, http.Header{}, nil, chunks, ResponseTiming{}, "req-1", ResponseCapture{Termination: TerminationEOF})
+	if err != nil {
+		t.Fatalf("LogResponse returned error: %v", err)
+	}
+	if len(lokiExporter.pushCalls) != 1 {
+		t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+	}
+
+	entry := lokiExporter.pushCalls[0].entry
+	gotChunks, ok := entry["chunks"].([]StreamChunk)
+	if !ok || len(gotChunks) != 1 || gotChunks[0].Raw != chunks[0].Raw {
+		t.Errorf("Expected Loki entry chunks %#v, got %#v", chunks, entry["chunks"])
+	}
+}
+
+func TestMultiWriter_LogResponse_FileLoggerAlwaysGetsFullBodyRegardlessOfLokiFlag(t *testing.T) {
+	for _, includeBody := range []bool{false, true} {
+		t.Run(fmt.Sprintf("non-streaming/includeBody=%v", includeBody), func(t *testing.T) {
+			fileLogger := newMockFileLogger()
+			lokiExporter := newMockLokiExporter(nil)
+			mw := NewMultiWriter(fileLogger, lokiExporter)
+			mw.includeBody = includeBody
+
+			body := []byte(secretResponseBody)
+			if err := mw.LogResponse("session-1", "anthropic", 1, 200, http.Header{}, body, nil, ResponseTiming{}, "req-1", ResponseCapture{Termination: TerminationEOF}); err != nil {
+				t.Fatalf("LogResponse returned error: %v", err)
+			}
+
+			if len(fileLogger.responseCalls) != 1 {
+				t.Fatalf("Expected 1 response call to file logger, got %d", len(fileLogger.responseCalls))
+			}
+			if got := string(fileLogger.responseCalls[0].body); got != secretResponseBody {
+				t.Errorf("File logger must always receive the full body; got %q, want %q", got, secretResponseBody)
+			}
+
+			// Aliasing guard - see TestMultiWriter_LogRequest_FileLoggerAlwaysGetsFullBodyRegardlessOfLokiFlag.
+			if len(lokiExporter.pushCalls) != 1 {
+				t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+			}
+			pushedEntry := lokiExporter.pushCalls[0].entry
+			for k := range pushedEntry {
+				delete(pushedEntry, k)
+			}
+			pushedEntry["body"] = "INJECTED-AFTER-THE-FACT"
+
+			if got := string(fileLogger.responseCalls[0].body); got != secretResponseBody {
+				t.Fatalf("File logger's recorded body changed after mutating the Loki-pushed map - entry is aliased! got %q, want %q", got, secretResponseBody)
+			}
+		})
+
+		t.Run(fmt.Sprintf("streaming/includeBody=%v", includeBody), func(t *testing.T) {
+			fileLogger := newMockFileLogger()
+			lokiExporter := newMockLokiExporter(nil)
+			mw := NewMultiWriter(fileLogger, lokiExporter)
+			mw.includeBody = includeBody
+
+			chunks := []StreamChunk{
+				{Timestamp: time.Now(), DeltaMs: 0, Raw: "data: " + secretResponseBody},
+			}
+			if err := mw.LogResponse("session-1", "anthropic", 1, 200, http.Header{}, nil, chunks, ResponseTiming{}, "req-1", ResponseCapture{Termination: TerminationEOF}); err != nil {
+				t.Fatalf("LogResponse returned error: %v", err)
+			}
+
+			if len(fileLogger.responseCalls) != 1 {
+				t.Fatalf("Expected 1 response call to file logger, got %d", len(fileLogger.responseCalls))
+			}
+			if len(fileLogger.responseCalls[0].chunks) != 1 || fileLogger.responseCalls[0].chunks[0].Raw != chunks[0].Raw {
+				t.Errorf("File logger must always receive the full chunks; got %#v, want %#v", fileLogger.responseCalls[0].chunks, chunks)
+			}
+
+			// Aliasing guard.
+			if len(lokiExporter.pushCalls) != 1 {
+				t.Fatalf("Expected 1 push call to Loki exporter, got %d", len(lokiExporter.pushCalls))
+			}
+			pushedEntry := lokiExporter.pushCalls[0].entry
+			for k := range pushedEntry {
+				delete(pushedEntry, k)
+			}
+			pushedEntry["chunks"] = "INJECTED-AFTER-THE-FACT"
+
+			if len(fileLogger.responseCalls[0].chunks) != 1 || fileLogger.responseCalls[0].chunks[0].Raw != chunks[0].Raw {
+				t.Fatalf("File logger's recorded chunks changed after mutating the Loki-pushed map - entry is aliased! got %#v, want %#v", fileLogger.responseCalls[0].chunks, chunks)
+			}
+		})
 	}
 }
 

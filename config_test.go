@@ -95,6 +95,10 @@ func TestDefaultConfig_LokiDefaults(t *testing.T) {
 	if cfg.Loki.Environment != "development" {
 		t.Errorf("expected Loki.Environment 'development', got %q", cfg.Loki.Environment)
 	}
+	// PRI-3040/PRI-2489: Loki gets metadata only by default.
+	if cfg.Loki.IncludeBody != false {
+		t.Errorf("expected Loki.IncludeBody false, got %v", cfg.Loki.IncludeBody)
+	}
 }
 
 func TestLoadConfigFromEnv_LokiEnabled(t *testing.T) {
@@ -141,6 +145,39 @@ func TestLoadConfigFromEnv_LokiBatchSize(t *testing.T) {
 
 	if cfg.Loki.BatchSize != 500 {
 		t.Errorf("expected Loki.BatchSize 500, got %d", cfg.Loki.BatchSize)
+	}
+}
+
+func TestLoadConfigFromEnv_LokiIncludeBody_DefaultUnset(t *testing.T) {
+	// Absent env var must leave today's metadata-only behavior unchanged.
+	os.Unsetenv("LLM_PROXY_LOKI_INCLUDE_BODY")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	if cfg.Loki.IncludeBody != false {
+		t.Errorf("expected Loki.IncludeBody false when env unset, got %v", cfg.Loki.IncludeBody)
+	}
+}
+
+func TestLoadConfigFromEnv_LokiIncludeBody_True(t *testing.T) {
+	os.Setenv("LLM_PROXY_LOKI_INCLUDE_BODY", "true")
+	defer os.Unsetenv("LLM_PROXY_LOKI_INCLUDE_BODY")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	if cfg.Loki.IncludeBody != true {
+		t.Errorf("expected Loki.IncludeBody true, got %v", cfg.Loki.IncludeBody)
+	}
+}
+
+func TestLoadConfigFromEnv_LokiIncludeBody_OneAlsoTrue(t *testing.T) {
+	os.Setenv("LLM_PROXY_LOKI_INCLUDE_BODY", "1")
+	defer os.Unsetenv("LLM_PROXY_LOKI_INCLUDE_BODY")
+
+	cfg := LoadConfigFromEnv(DefaultConfig())
+
+	if cfg.Loki.IncludeBody != true {
+		t.Errorf("expected Loki.IncludeBody true for '1', got %v", cfg.Loki.IncludeBody)
 	}
 }
 
@@ -362,6 +399,7 @@ batch_wait = "10s"
 retry_max = 3
 use_gzip = false
 environment = "production"
+include_body = true
 `
 	cfg, err := LoadConfigFromTOML([]byte(tomlContent))
 	if err != nil {
@@ -391,6 +429,26 @@ environment = "production"
 	}
 	if cfg.Loki.Environment != "production" {
 		t.Errorf("expected Loki.Environment 'production', got %q", cfg.Loki.Environment)
+	}
+	if cfg.Loki.IncludeBody != true {
+		t.Errorf("expected Loki.IncludeBody true, got %v", cfg.Loki.IncludeBody)
+	}
+}
+
+func TestLoadConfigFromTOML_LokiIncludeBody_DefaultFalseWhenOmitted(t *testing.T) {
+	// PRI-3040/PRI-2489: an absent include_body key must leave today's
+	// metadata-only behavior unchanged, matching the other optional Loki keys.
+	tomlContent := `
+[loki]
+enabled = true
+url = "http://loki:3100/loki/api/v1/push"
+`
+	cfg, err := LoadConfigFromTOML([]byte(tomlContent))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Loki.IncludeBody != false {
+		t.Errorf("expected Loki.IncludeBody false when omitted, got %v", cfg.Loki.IncludeBody)
 	}
 }
 
