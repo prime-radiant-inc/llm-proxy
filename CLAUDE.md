@@ -122,6 +122,7 @@ Sessions are tracked via `client_session_id` extracted from request bodies (e.g.
 | `LLM_PROXY_LOKI_RETRY_MAX` | Max retry attempts (default: 5) |
 | `LLM_PROXY_LOKI_USE_GZIP` | Enable gzip compression (`true` or `1`, default: true) |
 | `LLM_PROXY_LOKI_ENVIRONMENT` | Environment label for Grafana filtering |
+| `LLM_PROXY_LOKI_INCLUDE_BODY` | Include request/response bodies and streamed chunk text in Loki entries (`true` or `1`). **Default unset/false: Loki gets metadata only** (PRI-3040/PRI-2489). Omitted bodies are flagged `body_omitted: true` in the entry instead. Covers both `LogRequest`/`LogResponse` and the Bedrock/Mantle passthrough's `LogObservation` (which nests body/chunks under `request`/`response`). Never affects the on-disk file log, which always keeps the full body |
 | `BEDROCK_REGION` | AWS region for Bedrock (e.g., `us-west-2`). Enables Bedrock signing proxy mode |
 | `ANTHROPIC_AWS_MODE` | Set to `platform` to SigV4-sign anthropic passthrough traffic to Claude Platform on AWS instead of first-party Anthropic (requires `ANTHROPIC_AWS_REGION` and `ANTHROPIC_AWS_WORKSPACE_ID`). Empty or `off` = first-party passthrough (default); disables cleanly when no role is configured |
 | `ANTHROPIC_AWS_REGION` | AWS region for Claude Platform on AWS (e.g., `us-west-2`) |

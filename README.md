@@ -90,6 +90,7 @@ batch_wait = "5s"      # Max time before flushing batch (default: 5s)
 retry_max = 5          # Retry attempts on failure (default: 5)
 use_gzip = true        # Compress payloads (default: true)
 environment = "production"  # Label for filtering in Grafana
+include_body = false   # PRI-3040/PRI-2489: Loki gets metadata only by default. See below.
 ```
 
 Or use environment variables:
@@ -104,12 +105,14 @@ Or use environment variables:
 | `LLM_PROXY_LOKI_RETRY_MAX` | Max retry attempts |
 | `LLM_PROXY_LOKI_USE_GZIP` | Set to `true` or `1` for compression |
 | `LLM_PROXY_LOKI_ENVIRONMENT` | Environment label |
+| `LLM_PROXY_LOKI_INCLUDE_BODY` | Set to `true` or `1` to include request/response bodies (and streamed chunk text) in the entries pushed to Loki. **Default: unset/false - metadata only** (company rule PRI-3040/PRI-2489). When false, `request`/`response` Loki entries carry `body_omitted: true` instead of the body/chunks, keeping everything else (method, path, obfuscated headers, status, size, timing, request_sha, upstream, `_meta`, ...). Also covers the Bedrock/Mantle passthrough path's free-form observations (`LogObservation`): `body`/`chunks` nested under `request`/`response` are stripped the same way, with `body_omitted: true` added to whichever nested map had something removed. The on-disk file log and any downstream archive are unaffected either way - they always get the full body. |
 
 ### Behavior
 
 - **Non-blocking**: Loki export runs asynchronously and doesn't add latency to proxied requests
 - **Graceful degradation**: If Loki is unavailable, local file logging continues unaffected
 - **Buffered writes**: Logs are batched and retried on failure; buffer is flushed on shutdown
+- **Metadata only by default**: `request`/`response` entries omit the body (and streamed chunks) unless `LLM_PROXY_LOKI_INCLUDE_BODY`/`include_body` is explicitly set. This is a behavior change for any existing deployment that had Loki export enabled before this flag existed - see the PR that introduced it for migration notes.
 - **Session correlation**: Logs include session IDs for querying all entries from a single session
 
 ## Commands

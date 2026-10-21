@@ -73,6 +73,10 @@ func NewServer(cfg Config) (*Server, error) {
 		lokiPusher = lokiExporter
 	}
 	multiWriter := NewMultiWriter(fileLogger, lokiPusher)
+	// PRI-3040/PRI-2489: Loki gets metadata only unless explicitly opted in.
+	// Threaded here (not into LokiExporterConfig) because it governs what
+	// MultiWriter puts in the entry map, not how LokiExporter ships it.
+	multiWriter.includeBody = cfg.Loki.IncludeBody
 
 	sessionManager, err := NewSessionManager(cfg.LogDir, fileLogger)
 	if err != nil {
